@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-finnish-lexicon"
+version = "0.1.0"
+description = "Build a Finnish lexical database from Kaikki, Omorfi, Tatoeba, FinnWordNet and frequency lists, with an optional Chinese gloss layer."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE.md"]
+requires-python = ">=3.12"
+dependencies = ["psycopg[binary]>=3.2"]
+keywords = ["finnish", "lexicon", "wiktionary", "omorfi", "tatoeba", "nlp"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Text Processing :: Linguistic",
+  "Natural Language :: Finnish",
+]
+
+[project.optional-dependencies]
+# Omorfi is GPL-3.0. It is only needed for the Omorfi source and the
+# example-morphology check, so it stays out of the base install.
+omorfi = ["omorfi", "pyhfst"]
+
+[project.scripts]
+ofl = "open_finnish_lexicon.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+open_finnish_lexicon = ["source_releases.toml", "migrations/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

@@ -1,0 +1,84 @@
+[sources.omorfi]
+version = "fixture-1"
+source_kind = "tsv"
+url = "tests/fixtures/releases/omorfi-fixture.tar.gz"
+local_path = ""
+archive_kind = "tar.gz"
+checksum_sha256 = ""
+members = ["omorfi.tsv"]
+
+[sources.kaikki]
+version = "fixture-1"
+source_kind = "jsonl"
+url = "tests/fixtures/releases/kaikki-fixture.jsonl.gz"
+local_path = ""
+archive_kind = "gz"
+checksum_sha256 = ""
+members = ["kaikki-juosta.jsonl"]
+
+[sources.finnwordnet]
+version = "fixture-1"
+source_kind = "tsv"
+url = "tests/fixtures/releases/finnwordnet-fixture.zip"
+local_path = ""
+archive_kind = "zip"
+checksum_sha256 = ""
+members = ["finnwordnet.tsv"]
+
+[sources.tatoeba]
+version = "fixture-1"
+source_kind = "tsv"
+url = "tests/fixtures/releases/tatoeba-fixture.tar.bz2"
+local_path = ""
+archive_kind = "tar.bz2"
+checksum_sha256 = ""
+members = ["tatoeba.tsv"]
+[[sources.tatoeba.companions]]
+name = "links"
+url = "tests/fixtures/releases/tatoeba-links-fixture.csv"
+local_path = ""
+archive_kind = "plain"
+checksum_sha256 = ""
+members = ["links.csv"]
+
+[[sources.tatoeba.companions]]
+name = "sentences"
+url = "tests/fixtures/releases/tatoeba-sentences-fixture.csv"
+local_path = ""
+archive_kind = "plain"
+checksum_sha256 = ""
+members = ["sentences.csv"]
+
+[sources.frequency]
+version = "fixture-1"
+source_kind = "csv"
+url = "tests/fixtures/releases/frequency-fixture.csv"
+local_path = ""
+archive_kind = "plain"
+checksum_sha256 = ""
+members = ["frequency.csv"]
+
+[sources.wiktionary_zh]
+version = "fixture-1"
+source_kind = "jsonl"
+url = "tests/fixtures/releases/wiktionary-zh-fixture.jsonl"
+local_path = ""
+archive_kind = "plain"
+checksum_sha256 = ""
+members = ["wiktionary-zh-fixture.jsonl"]
+
+[sources.dbnary_zh]
+version = "fixture-1"
+source_kind = "ttl"
+url = "tests/fixtures/releases/dbnary-zh-exolex.ttl"
+local_path = ""
+archive_kind = "plain"
+checksum_sha256 = ""
+members = ["dbnary-zh-exolex.ttl"]
+[[sources.dbnary_zh.companions]]
+name = "enhancement"
+url = "tests/fixtures/releases/dbnary-zh-enhancement.ttl"
+local_path = ""
+archive_kind = "plain"
+checksum_sha256 = ""
+members = ["dbnary-zh-enhancement.ttl"]

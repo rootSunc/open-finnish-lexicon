@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: fi
+          POSTGRES_PASSWORD: fi
+          POSTGRES_DB: ofl_test
+        ports: ["54331:5432"]
+        options: >-
+          --health-cmd "pg_isready -U fi -d ofl_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      OFL_TEST_DATABASE_URL: postgresql://fi:fi@127.0.0.1:54331/ofl_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --group dev
+      - run: uv run ruff check src tests
+      - run: uv run pytest -q

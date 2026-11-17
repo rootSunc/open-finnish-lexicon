@@ -1,0 +1,18 @@
+@prefix ontolex: <http://www.w3.org/ns/lemon/ontolex#> .
+@prefix lexinfo: <http://www.lexinfo.net/ontology/3.0/lexinfo#> .
+@prefix dct: <http://purl.org/dc/terms/> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix ex: <https://example.test/dbnary/> .
+
+ex:juosta-entry a ontolex:LexicalEntry ;
+  dct:language "fi" ;
+  lexinfo:partOfSpeech lexinfo:verb ;
+  ontolex:canonicalForm ex:juosta-form ;
+  ontolex:sense ex:juosta-sense-1, ex:juosta-sense-2 .
+
+ex:juosta-form ontolex:writtenRep "juosta"@fi .
+ex:juosta-sense-1 a ontolex:LexicalSense ;
+  skos:definition [ rdf:value "to run"@en ] .
+ex:juosta-sense-2 a ontolex:LexicalSense ;
+  skos:definition [ rdf:value "to flow"@en ] .

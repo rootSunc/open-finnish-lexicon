@@ -1,0 +1,23 @@
+# Local PostgreSQL for `ofl build`.
+#
+#   docker compose up -d
+#   export OFL_DATABASE_URL=postgresql://ofl:ofl@127.0.0.1:54320/open_finnish_lexicon
+#   ofl build --output dist/fi.sqlite
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ofl
+      POSTGRES_PASSWORD: ofl
+      POSTGRES_DB: open_finnish_lexicon
+    ports:
+      - "127.0.0.1:54320:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ofl", "-d", "open_finnish_lexicon"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:
