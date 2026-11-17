@@ -20,7 +20,7 @@ sources and stays under their terms. Each source's license is also stored in
 | [Tatoeba](https://tatoeba.org/) | Example sentences and translations | CC BY 2.0 FR; some sentences CC0 1.0 | "Sentences from Tatoeba (https://tatoeba.org), CC BY 2.0 FR." |
 | [Omorfi](https://github.com/flammie/omorfi) | Inflected forms and analyses (optional extra) | GPL-3.0 | "Omorfi, Tommi A. Pirinen et al., GPL-3.0." The pipeline runs Omorfi's analyser and generator models; it does not redistribute them. |
 | [FrequencyWords](https://github.com/hermitdave/FrequencyWords) | Frequency rank | Data: CC BY-SA 4.0. Code: MIT. | "FrequencyWords by Hermit Dave, CC BY-SA 4.0." |
-| [FinnWordNet](https://www.kielipankki.fi/corpora/finnwordnet/) | Lexical relations | **Not yet verified** (`UNVERIFIED` in the registry) | Check the license on the Kielipankki page before you redistribute data that includes FinnWordNet relations. |
+| [FinnWordNet](https://www.kielipankki.fi/corpora/finnwordnet/) | Lexical relations | CC BY 3.0 | "FinnWordNet, University of Helsinki (Kielipankki), CC BY 3.0." |
 
 Share-alike sources (CC BY-SA) mean that a database or export that reproduces
 their text must be shared under the same license, with attribution.
