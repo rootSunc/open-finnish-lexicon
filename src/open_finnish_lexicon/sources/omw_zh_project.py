@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 import json
 from pathlib import Path
 import re
@@ -356,20 +356,26 @@ def project_omw_zh_rows(
                 for zw in omw_by_synset[sid][2].split("；"):
                     if zw:
                         zh_lemma_freq[zw] += 1
+            synonyms_by_synset = {
+                synset_id: en_syns_by_pair.get((synset_id, lemma), set()) | inline_en_syns.get(synset_id, set())
+                for synset_id in synset_ids
+            }
+            synonym_frequency = Counter(
+                synonym for synonyms in synonyms_by_synset.values() for synonym in synonyms
+            )
 
             for sense_id, sense_key, gloss_en in eligible_senses:
                 headwords, gloss_tokens = _extract_gloss_headwords_and_tokens(gloss_en)
                 if not headwords and not gloss_tokens:
                     continue
                 best_match: tuple[tuple[int, int, int, int, int], str] | None = None
-                for synset_id in synset_ids:
-                    en_syns = en_syns_by_pair.get((synset_id, lemma), set()) | inline_en_syns.get(
-                        synset_id, set()
-                    )
+                for synset_index, synset_id in enumerate(synset_ids):
                     def_tokens = def_tokens_by_synset.get(synset_id) or inline_def_tokens.get(
                         synset_id, set()
                     )
-                    syn_hits = len(headwords & en_syns)
+                    matched_headwords = headwords & synonyms_by_synset[synset_id]
+                    # A shared headword such as "bank" needs corroborating definition evidence.
+                    syn_hits = sum(synonym_frequency[word] == 1 for word in matched_headwords)
                     def_hits = len(gloss_tokens & def_tokens)
                     if syn_hits == 0 and def_hits < 2:
                         continue
@@ -393,7 +399,7 @@ def project_omw_zh_rows(
                         def_hits,
                         is_head,
                         consensus_freq,
-                        -synset_ids.index(synset_id),
+                        -synset_index,
                     )
                     if best_match is None or rank_key > best_match[0]:
                         best_match = (rank_key, synset_id)

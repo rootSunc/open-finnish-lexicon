@@ -52,14 +52,14 @@ def dispatch(argv: list[str]) -> int | None:
         _parse_no_arg_command(
             argv,
             "ofl seed-fixtures",
-            "Ingest bundled fixture datasets (requires OFL_PROFILE=fixture).",
+            "Ingest test data from the repository root (requires OFL_PROFILE=fixture).",
         )
         return seed_fixtures()
 
     if cmd == "sync-all":
         parser = OflArgumentParser(
             prog="ofl sync-all",
-            description="Download pinned releases and ingest sources into PostgreSQL.",
+            description="Download configured releases and ingest sources into PostgreSQL.",
         )
         parser.add_argument(
             "--manifest",
@@ -82,7 +82,7 @@ def dispatch(argv: list[str]) -> int | None:
         parser.add_argument(
             "--force-download",
             action="store_true",
-            help="Re-download rolling sources even if cached locally",
+            help="Re-download selected sources even if cached locally",
         )
         parser.add_argument(
             "--no-refresh",

@@ -1,0 +1,7 @@
+# Project-authored records in Kaikki format for local testing.
+[sources.kaikki]
+version = "fixture-demo"
+source_kind = "jsonl"
+url = "examples/mini-kaikki.jsonl"
+archive_kind = "plain"
+members = []

@@ -17,12 +17,13 @@ database
   init-db                        apply schema migrations
 
 sources
-  sync-all [--manifest <path>] [--sources <s1,s2>] [--exclude-sources <s1,s2>] [--force-download]
-                                 download pinned releases and ingest them all
+  sync-all [--manifest <path>] [--sources <s1,s2>] [--exclude-sources <s1,s2>]
+           [--force-download] [--no-refresh]
+                                 download configured releases and ingest them
   ingest-<source> --input <path> ingest one local file
                                  sources: kaikki, omorfi, tatoeba, frequency,
                                  finnwordnet, omw-zh, cedict-zh, wiktionary-zh, dbnary-zh
-  seed-fixtures                  ingest the bundled fixtures (OFL_PROFILE=fixture)
+  seed-fixtures                  ingest test data from the repository root (OFL_PROFILE=fixture)
   archive-stale-build-runs [--older-than-hours <n>]
 
 normalize
@@ -45,5 +46,6 @@ export
                                  write one JSON object per lexeme
   package-release [--dist-dir <dir>] [--prefix <name>] [--level <1..22>]
                   [--no-export] [--pure-jsonl] [--remove-uncompressed] [--overwrite]
+                  [--code-revision <commit>] [--dataset-version <version>]
                                  compress .sqlite.zst + .jsonl.zst and write SHA256SUMS
 """

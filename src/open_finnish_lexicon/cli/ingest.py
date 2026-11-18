@@ -46,6 +46,8 @@ def init_db() -> int:
 def seed_fixtures() -> int:
     if get_pipeline_settings().data_profile != "fixture":
         raise RuntimeError("seed-fixtures requires OFL_PROFILE=fixture")
+    if not all(input_path.is_file() for _, input_path in FIXTURE_INPUTS):
+        raise SystemExit("seed-fixtures requires the repository root with tests/fixtures/")
     for source_name, input_path in FIXTURE_INPUTS:
         run_manual_ingest(source_name, input_path)
     refresh_runtime_views()

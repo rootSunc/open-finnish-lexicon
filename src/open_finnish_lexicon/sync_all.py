@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from contextlib import contextmanager
+from dataclasses import asdict
 import importlib.util
 from pathlib import Path
 import sys
@@ -296,6 +297,10 @@ def _run_source(
             if release.name == "finnwordnet" and get_pipeline_settings().data_profile == "real":
                 project_kwargs["only_existing_lexemes"] = True
             pipeline.project(input_path, **project_kwargs)
+            conn.execute(
+                "update warehouse.source_file set assets = %s where id = %s",
+                (Jsonb([asdict(asset) for asset in fetch_result.assets]), source_file_id),
+            )
             finalize_source_snapshot(
                 release.name,
                 input_path,

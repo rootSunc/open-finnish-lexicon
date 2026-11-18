@@ -6,6 +6,12 @@
 
 Both exports write via a temporary `.<filename>.part` file and atomically replace the target on completion, so a failed or interrupted run never leaves a half-written artifact. Pass `--overwrite` to replace an existing file.
 
+The initial SQLite schema version is `1` in `PRAGMA user_version`. Release
+manifests identify the schema version of both formats. Treat numeric lexeme,
+sense, and form IDs as identifiers within one snapshot. Rebuilds can assign
+different IDs. For a lookup across snapshots, start with the lemma and part of
+speech, then compare the senses or upstream references.
+
 ---
 
 ## 1. SQLite Export Schema
@@ -18,9 +24,10 @@ Both exports write via a temporary `.<filename>.part` file and atomically replac
 | `sense` | `id` | `id`, `lexeme_id`, `sense_key`, `gloss_fi`, `gloss_en`, `labels` (JSON), `sort_order` | Word senses and English/Finnish definitions. |
 | `form` | `id` | `id`, `lexeme_id`, `surface_form`, `form_kind`, `features` (JSON), `validation` | Inflected surface forms and rule-validator verdicts (`verified`, `mismatch`, `uncertain`). |
 | `pronunciation` | `id` | `id`, `lexeme_id`, `ipa`, `syllabification` | Phonemic/phonetic IPA and middle-dot (`·`) Finnish syllabification. |
-| `example` | `id` | `id`, `text_fi`, `text_en`, `source_label`, `attribution` | Example sentences with upstream attribution (e.g., Tatoeba CC-BY-2.0-FR contributor). |
+| `example` | `id` | `id`, `text_fi`, `text_en`, `source_label`, `attribution`, `provenance` (JSON) | Example sentences and available original sentence references keyed by language. |
 | `sense_example` | — | `sense_id`, `example_id`, `sort_order` | Links senses to ranked example sentences. |
-| `zh_gloss` | — | `sense_id`, `gloss_zh`, `method` | Primary Simplified Chinese glosses (normalized via OpenCC `t2s`). |
+| `sense_source` | — | `sense_id`, `source_name`, `source_entry` | Active sources of the base sense and its upstream entry label. |
+| `zh_gloss` | — | `sense_id`, `gloss_zh`, `method`, `source_name`, `source_entry`, `confidence` | Primary Simplified Chinese glosses and available alignment evidence. |
 | `zh_example_translation` | — | `example_id`, `text_zh`, `method` | Usable primary Simplified Chinese translations of example sentences. |
 | `relation` | — | `source_lexeme_id`, `target_lexeme_id`, `relation_type` | Semantic relations (`synonym`, `antonym`, `hypernym`, `hyponym`, `holonym`, `meronym`). |
 | `derivation` | — | `parent_lexeme_id`, `child_lexeme_id`, `relation_type` | Derivational morphology links. |
@@ -28,12 +35,13 @@ Both exports write via a temporary `.<filename>.part` file and atomically replac
 | `topic` | — | `lexeme_id`, `sense_id`, `topic_id`, `label_en`, `label_cn` | Subject-domain tags with English and Chinese labels. |
 | `grammar_note` | `id` | `id`, `lexeme_id`, `sense_id`, `note_fi`, `note_en`, `note_kind` | Etymology, dialect qualifiers, and grammar/usage notes. |
 | `usage_warning` | `id` | `id`, `lexeme_id`, `sense_id`, `warning_fi`, `warning_en`, `warning_kind` | Sense-level usage caveats and warnings. |
-| `sources` | `name` | `name`, `version`, `source_url`, `license` | Upstream source versions and SPDX license expressions. |
+| `sources` | `name` | `name`, `version`, `source_url`, `license`, `sha256` | Active upstream source labels, licenses, and available input archive fingerprints. |
+| `export_metadata` | — | `build_id` | Identifies the snapshot in a distribution bundle. |
 
 ### Built-in Views & Full-Text Search (FTS5)
 
-- **`v_lexeme_summary`**: Convenience view (`id`, `lemma`, `display_lemma`, `part_of_speech`, `frequency_rank`, `is_lemma`, `primary_ipa`, `primary_gloss_en`, `primary_gloss_zh`).
-- **`lexeme_fts`**: SQLite **FTS5** virtual table (`unicode61 remove_diacritics 2`) indexing `lemma`, `display_lemma`, `gloss_en`, and `gloss_zh` (with unindexed `lexeme_id` and `part_of_speech`).
+- **`v_lexeme_summary`** contains `id`, `lemma`, `display_lemma`, `part_of_speech`, `frequency_rank`, `is_lemma`, `primary_ipa`, `primary_gloss_en` and `primary_gloss_zh`. Both gloss columns come from the same sense.
+- **`lexeme_fts`** uses SQLite FTS5 (`unicode61 remove_diacritics 2`) for token search on headwords and glosses. Use the regular indexes for exact form lookups. For Chinese substring matching, use the query below. An export made with SQLite compiled without FTS5 issues a warning and contains the regular indexes.
 
 ### Example SQLite Queries
 
@@ -45,11 +53,11 @@ WHERE is_lemma = 1 AND frequency_rank IS NOT NULL
 ORDER BY frequency_rank ASC
 LIMIT 20;
 
--- 2. Millisecond FTS5 lookup across Finnish headwords, English glosses, and Chinese glosses
+-- 2. FTS5 token lookup on headwords and glosses
 SELECT s.id, s.lemma, s.part_of_speech, s.primary_ipa, s.primary_gloss_en, s.primary_gloss_zh
 FROM lexeme_fts f
 JOIN v_lexeme_summary s ON s.id = f.lexeme_id
-WHERE lexeme_fts MATCH 'juosta OR 奔跑'
+WHERE lexeme_fts MATCH 'juosta'
 ORDER BY rank
 LIMIT 10;
 
@@ -63,7 +71,20 @@ LEFT JOIN example ex ON ex.id = se.example_id
 LEFT JOIN zh_example_translation zet ON zet.example_id = ex.id
 WHERE l.lemma = 'juosta' AND l.part_of_speech = 'verb'
 ORDER BY sn.sort_order, se.sort_order;
+
+-- 4. Chinese substring lookup without a tokenizer
+SELECT l.lemma, l.part_of_speech, s.gloss_en, g.gloss_zh, g.source_name
+FROM zh_gloss g
+JOIN sense s ON s.id = g.sense_id
+JOIN lexeme l ON l.id = s.lexeme_id
+WHERE instr(g.gloss_zh, '银行') > 0
+ORDER BY l.frequency_rank IS NULL, l.frequency_rank, l.lemma;
 ```
+
+`verified` means the rule engine predicts that form for the recorded features.
+`mismatch` means its prediction differed. `uncertain` means the rules could
+not reach a verdict. Chinese alignment scores are heuristic, and the
+experimental Chinese layer has incomplete coverage.
 
 ---
 
@@ -71,7 +92,18 @@ ORDER BY sn.sort_order, se.sort_order;
 
 By default, line 1 contains `{"_sources": [...]}` for standalone license attribution, followed by one JSON object per lexeme.
 
-For strict homogeneous JSONL pipelines (DuckDB, Polars, Spark, HuggingFace `datasets`), pass `--pure-jsonl` (or `--no-sources-header`) so every line is a lexeme object; source metadata remains available in `<output>.report.json`.
+Use `--pure-jsonl` (or `--no-sources-header`) to write a lexeme object on every
+line. `ofl build` writes a source report by default. `ofl package-release` also
+includes source metadata in its report and manifest. The standalone
+`export-jsonl` command writes only the JSONL file.
+
+Packaged JSONL with a header includes `_export` with the build ID and schema
+version. In pure mode the report binds the JSONL file to its snapshot by its
+SHA-256. Sense objects include `sources` and `gloss_zh_source`. Example objects
+include `provenance` when upstream identifiers are available. Tatoeba provenance
+lists each language's sentence ID, source URL, contributor where available,
+and whether a translation was linked through a pivot. Re-ingest older
+snapshots to populate these fields.
 
 ### Lexeme Object Structure
 
@@ -129,21 +161,31 @@ For strict homogeneous JSONL pipelines (DuckDB, Polars, Spark, HuggingFace `data
 
 ## 3. Compressed Release Bundles (`.zst` & `SHA256SUMS`)
 
-`ofl package-release --dist-dir dist --overwrite` builds a complete downstream distribution bundle:
+`ofl package-release --dist-dir dist/release` reads one PostgreSQL snapshot
+to produce the bundle. It checks core row counts, SQLite integrity and foreign
+keys and the build IDs before publishing the staged files. A new destination
+directory appears after the entire bundle is ready. With `--overwrite`,
+existing files are replaced individually and `SHA256SUMS` is written last.
 
 | Artifact | Description |
 | :--- | :--- |
 | `fi.sqlite.zst` | Zstandard-compressed standalone SQLite database (with FTS5 and `v_lexeme_summary`). |
 | `fi.jsonl.zst` | Zstandard-compressed JSON Lines export. |
-| `fi.sqlite.report.json` | Build step timings, row counts, coverage metrics, and SPDX source attributions. |
-| `release-manifest.json` | Machine-readable artifact metadata (compressed/uncompressed byte sizes, ratios, SHA-256 digests, and dataset summary). |
+| `fi.sqlite.report.json` | Counts, coverage, source references, and the snapshot ID and raw file hashes. |
+| `release-manifest.json` | File hashes and sizes, dataset version, schema version, build ID, code revision when supplied, and input fingerprints. |
+| `DATA-NOTICE.md` | Upstream attribution and applicable license notices. |
 | `SHA256SUMS` | Standard checksum manifest verifiable via `shasum -a 256 -c SHA256SUMS` or `sha256sum -c SHA256SUMS`. |
 
 ### Verifying & Unpacking Downstream
 
 ```bash
-cd dist
+cd dist/release
 shasum -a 256 -c SHA256SUMS
 zstd -d -k fi.sqlite.zst -o fi.sqlite
 zstd -d -k fi.jsonl.zst -o fi.jsonl
 ```
+
+`--no-export` repackages the matching raw files and report from an earlier
+`package-release` run. It can run without PostgreSQL. Use a fresh export for
+files from other workflows or older bundle formats. For release preparation,
+see [RELEASING.md](RELEASING.md).

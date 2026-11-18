@@ -5,6 +5,7 @@ from pathlib import Path
 
 from open_finnish_lexicon.db import connect
 from open_finnish_lexicon.sources.tatoeba_loader import (
+    attach_tatoeba_translations,
     get_tatoeba_source_kind,
     iter_tatoeba_entries,
     load_tatoeba_translations,
@@ -72,12 +73,11 @@ def stage_tatoeba_rows(
                 from stdin
                 """
             ) as copy:
-                for index, entry in enumerate(entries, start=1):
-                    translation_entry = translations_by_sentence_id.get(
-                        entry.sentence_id or "", {}
+                for index, raw_entry in enumerate(entries, start=1):
+                    entry = attach_tatoeba_translations(
+                        raw_entry, translations_by_sentence_id.get(raw_entry.sentence_id or "", {}),
                     )
-                    text_zh = entry.text_zh or translation_entry.get("zh")
-                    text_en = entry.text_en or translation_entry.get("en")
+                    text_zh, text_en = entry.text_zh, entry.text_en
                     payload: dict[str, object] = {
                         "source_external_id": entry.external_id,
                         "text_fi": entry.text_fi,
@@ -95,6 +95,8 @@ def stage_tatoeba_rows(
                         payload["created_at"] = entry.created_at
                     if entry.updated_at:
                         payload["updated_at"] = entry.updated_at
+                    if entry.provenance:
+                        payload["provenance"] = entry.provenance
 
                     subject_key = entry.sense_key or entry.external_id
                     claim_payload = {

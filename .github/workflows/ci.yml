@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -24,12 +27,39 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       OFL_TEST_DATABASE_URL: postgresql://fi:fi@127.0.0.1:54331/ofl_test
+      OFL_REQUIRE_TEST_DB: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --group dev
+      - run: sudo apt-get update && sudo apt-get install -y zstd
+      - run: uv sync --locked --group dev
       - run: uv run ruff check src tests
       - run: uv run ty check src
       - run: uv run pytest -q
+
+  release-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ofl
+          POSTGRES_PASSWORD: ofl
+          POSTGRES_DB: ofl_demo
+        ports: ["54332:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ofl -d ofl_demo"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      OFL_DATABASE_URL: postgresql://ofl:ofl@127.0.0.1:54332/ofl_demo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y zstd
+      - run: |
+          uv build --out-dir wheelhouse
+          uv run --no-project --isolated --with wheelhouse/*.whl python scripts/check-wheel.py

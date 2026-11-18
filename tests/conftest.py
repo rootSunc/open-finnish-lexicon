@@ -32,7 +32,9 @@ def _db_session_setup():
     try:
         with _REAL_PSYCOPG_CONNECT(get_test_database_url(), connect_timeout=2):
             pass
-    except psycopg.OperationalError:
+    except psycopg.OperationalError as exc:
+        if os.environ.get("OFL_REQUIRE_TEST_DB") == "1":
+            pytest.exit(f"PostgreSQL test database is required: {exc}", returncode=1)
         mp = pytest.MonkeyPatch()
 
         def _skip_on_db_connect(*_args, **_kwargs):

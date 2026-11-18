@@ -20,11 +20,19 @@ from open_finnish_lexicon.sources.catalog import SourceRelease
 
 
 @dataclass(frozen=True)
+class SourceAsset:
+    name: str
+    url: str
+    sha256: str
+
+
+@dataclass(frozen=True)
 class FetchResult:
     archive_path: Path
     unpack_dir: Path
     checksum_sha256: str
     member_paths: tuple[Path, ...]
+    assets: tuple[SourceAsset, ...] = ()
 
 
 USER_AGENT = "open-finnish-lexicon/0.1 (+https://github.com/open-finnish-lexicon; lexical-builder)"
@@ -346,6 +354,7 @@ def fetch_release(
         force_download=force_download,
     )
     all_member_paths = list(member_paths)
+    assets = [SourceAsset(release.name, release.url, checksum)]
     companion_receipts = []
     for companion in release.companions:
         companion_archive_path, companion_checksum, companion_member_paths = _fetch_asset(
@@ -360,6 +369,7 @@ def fetch_release(
             force_download=force_download,
         )
         all_member_paths.extend(companion_member_paths)
+        assets.append(SourceAsset(companion.name, companion.url, companion_checksum))
         companion_receipts.append(
             {
                 "name": companion.name,
@@ -392,4 +402,5 @@ def fetch_release(
         unpack_dir=unpack_dir,
         checksum_sha256=checksum,
         member_paths=tuple(all_member_paths),
+        assets=tuple(assets),
     )

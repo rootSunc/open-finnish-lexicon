@@ -18,6 +18,19 @@ services:
       test: ["CMD", "pg_isready", "-U", "ofl", "-d", "open_finnish_lexicon"]
       interval: 5s
       retries: 10
+  demo:
+    profiles: ["demo"]
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ofl
+      POSTGRES_PASSWORD: ofl
+      POSTGRES_DB: ofl_demo
+    ports:
+      - "127.0.0.1:54332:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ofl", "-d", "ofl_demo"]
+      interval: 2s
+      retries: 10
 
 volumes:
   pgdata:

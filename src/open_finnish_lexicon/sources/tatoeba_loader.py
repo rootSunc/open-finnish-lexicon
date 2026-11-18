@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import re
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from open_finnish_lexicon.db import connection_scope
 from open_finnish_lexicon.sources.lexeme_lookup import (
@@ -78,6 +79,24 @@ def _format_tatoeba_attribution(username: str | None) -> str | None:
     return f"Tatoeba ({cleaned})"
 
 
+type SentenceCitation = dict[str, str | bool | None]
+
+
+def _sentence_citation(sentence_id: str, username: str | None) -> SentenceCitation:
+    contributor = (username or "").strip()
+    return {
+        "sentence_id": sentence_id,
+        "url": f"https://tatoeba.org/en/sentences/show/{sentence_id}",
+        "contributor": contributor if contributor and contributor != r"\N" else None,
+    }
+
+
+@dataclass(frozen=True)
+class TatoebaTranslation:
+    text: str
+    citation: SentenceCitation
+
+
 @dataclass(frozen=True)
 class TatoebaEntry:
     external_id: str
@@ -90,6 +109,23 @@ class TatoebaEntry:
     username: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    provenance: dict[str, SentenceCitation] | None = None
+
+
+def attach_tatoeba_translations(
+    entry: TatoebaEntry, translations: dict[str, TatoebaTranslation],
+) -> TatoebaEntry:
+    provenance = dict(entry.provenance or {})
+    if entry.sentence_id and "fi" not in provenance:
+        provenance["fi"] = _sentence_citation(entry.sentence_id, entry.username)
+    text_en, text_zh = entry.text_en, entry.text_zh
+    if not text_en and (english := translations.get("en")):
+        text_en = english.text
+        provenance["en"] = english.citation
+    if not text_zh and (chinese := translations.get("zh")):
+        text_zh = chinese.text
+        provenance["zh"] = chinese.citation
+    return replace(entry, text_en=text_en, text_zh=text_zh, provenance=provenance or None)
 
 
 @dataclass
@@ -173,7 +209,9 @@ def discover_tatoeba_companion_paths(input_path: Path) -> tuple[Path | None, lis
     return links_path, sentence_paths
 
 
-def load_tatoeba_translations(input_path: Path, sentence_ids: set[str]) -> dict[str, dict[str, str]]:
+def load_tatoeba_translations(
+    input_path: Path, sentence_ids: set[str],
+) -> dict[str, dict[str, TatoebaTranslation]]:
     if not sentence_ids:
         return {}
 
@@ -253,14 +291,14 @@ def load_tatoeba_translations(input_path: Path, sentence_ids: set[str]) -> dict[
         for linked_id in linked_ids
     }
 
-    translated_sentences: dict[str, dict[str, tuple[int, str]]] = {}
+    translated_sentences: dict[str, dict[str, tuple[int, str, str | None]]] = {}
     for sentences_path in sentence_paths:
         with sentences_path.open(encoding="utf-8") as handle:
             for line in handle:
                 stripped = line.rstrip("\n")
                 if not stripped:
                     continue
-                parts = stripped.split("\t", 3)
+                parts = stripped.split("\t", 5)
                 if len(parts) < 3:
                     continue
                 sentence_id, language_code, text = parts[:3]
@@ -280,19 +318,18 @@ def load_tatoeba_translations(input_path: Path, sentence_ids: set[str]) -> dict[
                 sentence_translations = translated_sentences.setdefault(sentence_id, {})
                 current = sentence_translations.get(translation_kind)
                 if current is None or priority < current[0]:
-                    sentence_translations[translation_kind] = (priority, text)
+                    username = parts[3] if len(parts) >= 6 else None
+                    sentence_translations[translation_kind] = (priority, text, username)
 
-    translations: dict[str, dict[str, str]] = {}
+    translations: dict[str, dict[str, TatoebaTranslation]] = {}
     for sentence_id, linked_ids in linked_ids_by_sentence.items():
-        translation_entry: dict[str, str] = {}
+        translation_entry: dict[str, TatoebaTranslation] = {}
         for linked_id in linked_ids:
-            translated = translated_sentences.get(linked_id, {})
-            text_zh = translated.get("zh")
-            if text_zh is not None and "zh" not in translation_entry:
-                translation_entry["zh"] = text_zh[1]
-            text_en = translated.get("en")
-            if text_en is not None and "en" not in translation_entry:
-                translation_entry["en"] = text_en[1]
+            for language, (_, text, username) in translated_sentences.get(linked_id, {}).items():
+                if language not in translation_entry:
+                    citation = _sentence_citation(linked_id, username)
+                    citation["via_pivot"] = linked_id not in direct_sets_by_sentence[sentence_id]
+                    translation_entry[language] = TatoebaTranslation(text, citation)
             if "zh" in translation_entry and "en" in translation_entry:
                 break
         if translation_entry:
@@ -488,7 +525,7 @@ def _upsert_tatoeba_chunk_with_cache(
     conn: psycopg.Connection,
     entries: list[TatoebaEntry],
     cache: TatoebaLookupCache,
-    translations_by_sentence_id: dict[str, dict[str, str]],
+    translations_by_sentence_id: dict[str, dict[str, TatoebaTranslation]],
 ) -> None:
     if not entries:
         return
@@ -536,25 +573,36 @@ def _upsert_tatoeba_chunk_with_cache(
     for lexeme_id in unresolved_sense_candidates:
         cache.sense_candidates[lexeme_id] = resolved_sense_candidates.get(lexeme_id, [])
 
-    example_rows: dict[str, tuple[str | None, float, str | None, str | None]] = {}
+    example_rows: dict[
+        str, tuple[str | None, float, str | None, str | None, dict[str, SentenceCitation]]
+    ] = {}
     link_rows: list[tuple[str, int, int]] = []
     for entry in entries:
         if entry.quality_score < TATOEBA_MIN_EXAMPLE_QUALITY:
             continue
         existing = example_rows.get(entry.text_fi)
-        translation_entry = translations_by_sentence_id.get(entry.sentence_id or "", {})
-        text_zh = _clean_direct_chinese_translation(
-            entry.text_zh or translation_entry.get("zh")
+        entry = attach_tatoeba_translations(
+            entry, translations_by_sentence_id.get(entry.sentence_id or "", {}),
         )
-        text_en = entry.text_en or translation_entry.get("en")
+        text_zh = _clean_direct_chinese_translation(entry.text_zh)
+        text_en = entry.text_en
         attribution = _format_tatoeba_attribution(entry.username)
+        provenance = entry.provenance or {}
+        if not text_zh:
+            provenance.pop("zh", None)
         if existing is None or entry.quality_score > existing[1]:
-            example_rows[entry.text_fi] = (text_en, entry.quality_score, text_zh, attribution)
+            example_rows[entry.text_fi] = (text_en, entry.quality_score, text_zh, attribution, provenance)
         else:
             merged_en = existing[0] or text_en
             merged_zh = existing[2] or text_zh
             merged_attr = existing[3] or attribution
-            example_rows[entry.text_fi] = (merged_en, existing[1], merged_zh, merged_attr)
+            merged_provenance = dict(provenance)
+            for language, existing_value in (("en", existing[0]), ("zh", existing[2]), ("fi", existing[3])):
+                if existing_value:
+                    merged_provenance.pop(language, None)
+                    if language in existing[4]:
+                        merged_provenance[language] = existing[4][language]
+            example_rows[entry.text_fi] = (merged_en, existing[1], merged_zh, merged_attr, merged_provenance)
 
         seen_sense_ids: set[int] = set()
         sort_order = 1
@@ -584,7 +632,8 @@ def _upsert_tatoeba_chunk_with_cache(
                 text_en text,
                 quality_score numeric(6, 5) not null,
                 text_zh text,
-                attribution text
+                attribution text,
+                provenance jsonb
             ) on commit drop
             """
         )
@@ -605,7 +654,8 @@ def _upsert_tatoeba_chunk_with_cache(
                 text_en text,
                 quality_score numeric(6, 5) not null,
                 text_zh text,
-                attribution text
+                attribution text,
+                provenance jsonb
             ) on commit drop
             """
         )
@@ -623,23 +673,31 @@ def _upsert_tatoeba_chunk_with_cache(
 
         with cursor.copy(
             """
-            copy tmp_tatoeba_example_chunk (text_fi, text_en, quality_score, text_zh, attribution)
+            copy tmp_tatoeba_example_chunk (text_fi, text_en, quality_score, text_zh, attribution, provenance)
             from stdin
             """
         ) as copy:
-            for text_fi, (text_en, quality_score, text_zh, attribution) in example_rows.items():
-                copy.write_row((text_fi, text_en, quality_score, text_zh, attribution))
+            for text_fi, (text_en, quality_score, text_zh, attribution, provenance) in example_rows.items():
+                copy.write_row((text_fi, text_en, quality_score, text_zh, attribution, Jsonb(provenance)))
 
         cursor.execute(
             """
-            insert into tmp_tatoeba_example (text_fi, text_en, quality_score, text_zh, attribution)
-            select text_fi, text_en, quality_score, text_zh, attribution
+            insert into tmp_tatoeba_example (text_fi, text_en, quality_score, text_zh, attribution, provenance)
+            select text_fi, text_en, quality_score, text_zh, attribution, provenance
             from tmp_tatoeba_example_chunk
             on conflict (text_fi) do update
             set text_en = coalesce(excluded.text_en, tmp_tatoeba_example.text_en),
                 quality_score = greatest(tmp_tatoeba_example.quality_score, excluded.quality_score),
                 text_zh = coalesce(excluded.text_zh, tmp_tatoeba_example.text_zh),
-                attribution = coalesce(excluded.attribution, tmp_tatoeba_example.attribution)
+                attribution = coalesce(excluded.attribution, tmp_tatoeba_example.attribution),
+                provenance = jsonb_strip_nulls(jsonb_build_object(
+                    'fi', case when excluded.attribution is not null then excluded.provenance->'fi'
+                               else coalesce(tmp_tatoeba_example.provenance->'fi', excluded.provenance->'fi') end,
+                    'en', case when excluded.text_en is not null then excluded.provenance->'en'
+                               else tmp_tatoeba_example.provenance->'en' end,
+                    'zh', case when excluded.text_zh is not null then excluded.provenance->'zh'
+                               else tmp_tatoeba_example.provenance->'zh' end
+                ))
             """
         )
 
@@ -668,7 +726,7 @@ def _ingest_real_tatoeba(
     input_path: Path,
     *,
     entries: list[TatoebaEntry] | None = None,
-    translations_by_sentence_id: dict[str, dict[str, str]] | None = None,
+    translations_by_sentence_id: dict[str, dict[str, TatoebaTranslation]] | None = None,
     connection: psycopg.Connection | None = None,
 ) -> None:
     source_entries = list(iter_tatoeba_entries(input_path)) if entries is None else entries
@@ -707,9 +765,9 @@ def _ingest_real_tatoeba(
         conn.execute(
             """
             insert into lexicon.example (
-                text_fi, text_en, source_label, quality_score, attribution
+                text_fi, text_en, source_label, quality_score, attribution, provenance
             )
-            select text_fi, text_en, 'tatoeba', quality_score, attribution
+            select text_fi, text_en, 'tatoeba', quality_score, attribution, provenance
             from tmp_tatoeba_example
             where exists (
                 select 1

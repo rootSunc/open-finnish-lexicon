@@ -11,8 +11,13 @@ import json
 from pathlib import Path
 import sqlite3
 from typing import LiteralString
+import warnings
 
-from open_finnish_lexicon.db import connect
+import psycopg
+
+from open_finnish_lexicon.db import connection_scope
+
+EXPORT_SCHEMA_VERSION = 1
 
 # (sqlite table, column definitions, postgres select returning the same columns)
 SQLITE_TABLES: tuple[tuple[str, str, LiteralString], ...] = (
@@ -46,8 +51,8 @@ SQLITE_TABLES: tuple[tuple[str, str, LiteralString], ...] = (
     (
         "example",
         "id integer primary key, text_fi text not null, text_en text, "
-        "source_label text, attribution text",
-        "select id, text_fi, text_en, source_label, attribution from lexicon.example order by id",
+        "source_label text, attribution text, provenance text",
+        "select id, text_fi, text_en, source_label, attribution, provenance::text from lexicon.example order by id",
     ),
     (
         "sense_example",
@@ -94,10 +99,27 @@ SQLITE_TABLES: tuple[tuple[str, str, LiteralString], ...] = (
         "select id, lexeme_id, sense_id, warning_fi, warning_en, warning_kind from lexicon.usage_warning order by id",
     ),
     (
+        "sense_source",
+        "sense_id integer not null references sense(id), source_name text not null, source_entry text not null",
+        "select distinct ss.sense_id, sr.name, l.lemma from lexicon.sense_source ss "
+        "join lexicon.lexeme_sense s on s.id = ss.sense_id join lexicon.lexeme l on l.id = s.lexeme_id "
+        "join warehouse.source_file sf on sf.id = ss.source_file_id "
+        "join warehouse.source_registry sr on sr.id = sf.source_registry_id "
+        "where sf.snapshot_state = 'active' order by ss.sense_id, sr.name, l.lemma",
+    ),
+    (
         "zh_gloss",
-        "sense_id integer not null references sense(id), gloss_zh text not null, method text",
-        "select sense_id, gloss_zh, generation_method from zh_layer.zh_gloss "
-        "where is_primary and gloss_zh is not null order by sense_id",
+        "sense_id integer not null references sense(id), gloss_zh text not null, method text, "
+        "source_name text, source_entry text, confidence real",
+        "select g.sense_id, g.gloss_zh, g.generation_method, "
+        "case when g.generation_method = 'project-rule' then 'project_rules' else c.source_name end, "
+        "case when g.generation_method <> 'project-rule' then d.external_id end, "
+        "selection.confidence_score::float8 from zh_layer.zh_gloss g "
+        "left join semantic.zh_gloss_selection selection "
+        "on selection.target_sense_id = g.sense_id and selection.gloss_zh = g.gloss_zh "
+        "left join semantic.zh_gloss_candidate c on c.id = selection.zh_gloss_candidate_id "
+        "left join warehouse.source_document d on d.id = c.source_document_id "
+        "where g.is_primary and g.gloss_zh is not null order by g.sense_id",
     ),
     (
         "zh_example_translation",
@@ -107,13 +129,14 @@ SQLITE_TABLES: tuple[tuple[str, str, LiteralString], ...] = (
     ),
     (
         "sources",
-        "name text primary key, version text, source_url text, license text",
-        "select distinct on (sr.name) sr.name, coalesce(sf.source_version, sr.version), "
-        "coalesce(sf.source_url, sr.source_url), sr.license "
+        "name text primary key, version text, source_url text, license text, sha256 text",
+        "select sr.name, sf.source_version, "
+        "case when sf.source_url like 'https://%' or sf.source_url like 'http://%' "
+        "then sf.source_url end, sr.license, nullif(sf.checksum_sha256, '') "
         "from warehouse.source_registry sr "
-        "left join warehouse.source_file sf "
+        "join warehouse.source_file sf "
         "on sf.source_registry_id = sr.id and sf.snapshot_state = 'active' "
-        "order by sr.name, sf.imported_at desc nulls last",
+        "order by sr.name",
     ),
 )
 
@@ -122,6 +145,7 @@ SQLITE_INDEXES: tuple[str, ...] = (
     "create index idx_lexeme_lemma_nocase on lexeme (lemma collate nocase)",
     "create index idx_lexeme_frequency on lexeme (frequency_rank) where frequency_rank is not null",
     "create index idx_sense_lexeme on sense (lexeme_id)",
+    "create index idx_sense_source_sense on sense_source (sense_id)",
     "create index idx_form_lexeme on form (lexeme_id)",
     "create index idx_form_surface on form (surface_form)",
     "create index idx_form_surface_nocase on form (surface_form collate nocase)",
@@ -157,22 +181,16 @@ def _build_sqlite_views_and_fts(target: sqlite3.Connection) -> None:
             l.frequency_rank,
             l.is_lemma,
             (select p.ipa from pronunciation p where p.lexeme_id = l.id order by p.id limit 1) as primary_ipa,
-            (
-                select s.gloss_en
-                from sense s
-                where s.lexeme_id = l.id and s.gloss_en is not null
-                order by (case when coalesce(s.labels, '') like '%"form-of"%' then 1 else 0 end), s.sort_order, s.id
-                limit 1
-            ) as primary_gloss_en,
-            (
-                select zg.gloss_zh
-                from sense s
-                join zh_gloss zg on zg.sense_id = s.id
-                where s.lexeme_id = l.id
-                order by (case when coalesce(s.labels, '') like '%"form-of"%' then 1 else 0 end), s.sort_order, s.id
-                limit 1
-            ) as primary_gloss_zh
+            primary_sense.gloss_en as primary_gloss_en,
+            zg.gloss_zh as primary_gloss_zh
         from lexeme l
+        left join sense primary_sense on primary_sense.id = (
+            select s.id from sense s
+            where s.lexeme_id = l.id and coalesce(s.gloss_en, s.gloss_fi) is not null
+            order by (case when coalesce(s.labels, '') like '%"form-of"%' then 1 else 0 end), s.sort_order, s.id
+            limit 1
+        )
+        left join zh_gloss zg on zg.sense_id = primary_sense.id
         """
     )
     try:
@@ -211,12 +229,19 @@ def _build_sqlite_views_and_fts(target: sqlite3.Connection) -> None:
             from lexeme l
             """
         )
-    except sqlite3.OperationalError:
-        # FTS5 is enabled in standard Python builds; skip gracefully if compiled without it.
-        pass
+    except sqlite3.OperationalError as exc:
+        if str(exc) != "no such module: fts5":
+            raise
+        warnings.warn("SQLite was built without FTS5. The export uses regular indexes.", stacklevel=2)
 
 
-def export_sqlite(output: Path, *, overwrite: bool = False) -> dict[str, int]:
+def export_sqlite(
+    output: Path,
+    *,
+    overwrite: bool = False,
+    connection: psycopg.Connection | None = None,
+    build_id: str | None = None,
+) -> dict[str, int]:
     if output.exists() and not overwrite:
         raise FileExistsError(f"{output} already exists")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -229,7 +254,11 @@ def export_sqlite(output: Path, *, overwrite: bool = False) -> dict[str, int]:
         target.execute("pragma journal_mode = memory")
         target.execute("pragma synchronous = off")
         target.execute("pragma temp_store = memory")
-        with connect() as conn:
+        target.execute(f"pragma user_version = {EXPORT_SCHEMA_VERSION}")
+        if build_id is not None:
+            target.execute("create table export_metadata (build_id text not null)")
+            target.execute("insert into export_metadata values (?)", (build_id,))
+        with connection_scope(connection) as conn:
             for table, columns, select_sql in SQLITE_TABLES:
                 target.execute(f"create table {table} ({columns})")
                 total = 0
@@ -293,6 +322,15 @@ select jsonb_build_object(
             'gloss_fi', s.gloss_fi,
             'gloss_zh', zg.gloss_zh,
             'gloss_zh_method', zg.generation_method,
+            'gloss_zh_source', zg.provenance,
+            'sources', coalesce((
+                select jsonb_agg(distinct jsonb_build_object('name', sr.name, 'entry', l.lemma)
+                                 order by jsonb_build_object('name', sr.name, 'entry', l.lemma))
+                from lexicon.sense_source ss
+                join warehouse.source_file sf on sf.id = ss.source_file_id and sf.snapshot_state = 'active'
+                join warehouse.source_registry sr on sr.id = sf.source_registry_id
+                where ss.sense_id = s.id
+            ), '[]'::jsonb),
             'labels', s.labels,
             'notes', coalesce((
                 select jsonb_agg(gn.note_en order by gn.id)
@@ -310,7 +348,8 @@ select jsonb_build_object(
                     'en', e.text_en,
                     'zh', zet.text_zh,
                     'source', e.source_label,
-                    'attribution', e.attribution
+                    'attribution', e.attribution,
+                    'provenance', e.provenance
                 ) order by se.sort_order, e.id)
                 from lexicon.sense_example se
                 join lexicon.example e on e.id = se.example_id
@@ -329,8 +368,20 @@ select jsonb_build_object(
         ) order by s.sort_order, s.id)
         from lexicon.lexeme_sense s
         left join lateral (
-            select g.gloss_zh, g.generation_method
+            select g.gloss_zh, g.generation_method,
+                   case
+                       when g.generation_method = 'project-rule' then jsonb_build_object(
+                           'name', 'project_rules', 'entry', null, 'confidence', selection.confidence_score
+                       )
+                       when c.id is not null then jsonb_build_object(
+                           'name', c.source_name, 'entry', d.external_id, 'confidence', selection.confidence_score
+                       )
+                   end as provenance
             from zh_layer.zh_gloss g
+            left join semantic.zh_gloss_selection selection
+              on selection.target_sense_id = g.sense_id and selection.gloss_zh = g.gloss_zh
+            left join semantic.zh_gloss_candidate c on c.id = selection.zh_gloss_candidate_id
+            left join warehouse.source_document d on d.id = c.source_document_id
             where g.sense_id = s.id and g.is_primary
             order by g.id desc
             limit 1
@@ -399,6 +450,8 @@ def export_jsonl(
     *,
     overwrite: bool = False,
     include_sources_header: bool = True,
+    connection: psycopg.Connection | None = None,
+    build_id: str | None = None,
 ) -> int:
     """Write one lexeme per line; by default the first line is a ``_sources`` header."""
 
@@ -410,15 +463,17 @@ def export_jsonl(
 
     total = 0
     try:
-        with connect() as conn, temp_path.open("w", encoding="utf-8") as handle:
+        with connection_scope(connection) as conn, temp_path.open("w", encoding="utf-8") as handle:
             if include_sources_header:
                 sources = conn.execute(SQLITE_TABLES[-1][2]).fetchall()
                 header = {
                     "_sources": [
-                        {"name": n, "version": v, "url": u, "license": lic}
-                        for n, v, u, lic in sources
+                        {"name": n, "version": v, "url": u, "license": lic, "sha256": checksum}
+                        for n, v, u, lic, checksum in sources
                     ]
                 }
+                if build_id is not None:
+                    header["_export"] = {"build_id": build_id, "schema_version": EXPORT_SCHEMA_VERSION}
                 handle.write(json.dumps(header, ensure_ascii=False) + "\n")
             with conn.cursor(name="export_jsonl") as cursor:
                 cursor.itersize = 2000

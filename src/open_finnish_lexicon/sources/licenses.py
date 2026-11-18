@@ -8,8 +8,8 @@ SOURCE_LICENSES: dict[str, str] = {
     # Wiktionary text is dual-licensed; reusers may pick CC BY-SA.
     "kaikki": "CC-BY-SA-4.0 OR GFDL-1.3-or-later",
     "wiktionary_zh": "CC-BY-SA-4.0 OR GFDL-1.3-or-later",
-    "dbnary_zh": "CC-BY-SA-3.0",
-    "omw_zh": "WordNet",
+    "dbnary_zh": "CC-BY-SA-4.0",
+    "omw_zh": "LicenseRef-Chinese-Open-Wordnet",
     "cedict_zh": "CC-BY-SA-4.0",
     # Default Tatoeba license; some sentences are released as CC0-1.0.
     "tatoeba": "CC-BY-2.0-FR",

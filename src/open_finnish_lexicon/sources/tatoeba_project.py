@@ -91,6 +91,7 @@ def project_tatoeba_rows(
                         if isinstance(payload.get("updated_at"), str)
                         else None
                     ),
+                    provenance=payload.get("provenance"),
                 )
             )
         ingest_tatoeba(input_path, entries=staged_entries, connection=conn)

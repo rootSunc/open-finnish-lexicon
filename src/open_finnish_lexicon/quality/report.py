@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from psycopg import sql
+from psycopg import Connection, sql
 
-from open_finnish_lexicon.db import connect
+from open_finnish_lexicon.db import connection_scope
 from open_finnish_lexicon.zh_script import simplified_chinese_text_issue
 
 TABLE_COUNTS = (
@@ -30,8 +30,8 @@ def _scalar_int(row: tuple[Any, ...] | None) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
-def collect_data_quality_metrics() -> dict[str, Any]:
-    with connect() as conn:
+def collect_data_quality_metrics(*, connection: Connection | None = None) -> dict[str, Any]:
+    with connection_scope(connection) as conn:
         counts = {
             table: (
                 _scalar_int(
@@ -60,9 +60,13 @@ def collect_data_quality_metrics() -> dict[str, Any]:
                 (select count(*) from lexicon.lexeme where frequency_rank is not null),
                 (select count(*) from lexicon.lexeme_sense s
                   where exists (select 1 from lexicon.sense_example se where se.sense_id = s.id)),
-                (select count(distinct sense_id) from zh_layer.zh_gloss where gloss_zh is not null)
+                (select count(distinct sense_id) from zh_layer.zh_gloss where gloss_zh is not null),
+                (select count(*) from lexicon.lexeme where is_lemma),
+                (select count(gloss_en) from lexicon.lexeme_sense),
+                (select count(gloss_fi) from lexicon.lexeme_sense)
             """
-        ).fetchone() or (0, 0, 0, 0, 0)
+        ).fetchone()
+        assert coverage is not None
         verdicts = dict(
             conn.execute(
                 "select verdict, count(*) from lexicon.form_validation group by verdict order by verdict"
@@ -70,9 +74,10 @@ def collect_data_quality_metrics() -> dict[str, Any]:
         )
         sources = conn.execute(
             """
-            select sr.name, sf.source_version, sr.license, sf.imported_at
+            select sr.name, sf.source_version, sr.license, sf.imported_at,
+                   sf.source_url, sf.checksum_sha256, sf.assets
             from warehouse.source_registry sr
-            left join warehouse.source_file sf
+            join warehouse.source_file sf
               on sf.source_registry_id = sr.id and sf.snapshot_state = 'active'
             order by sr.name, sf.imported_at
             """
@@ -89,12 +94,30 @@ def collect_data_quality_metrics() -> dict[str, Any]:
             "lexemes_with_frequency_rank": coverage[2],
             "senses_with_examples": coverage[3],
             "senses_with_zh_gloss": coverage[4],
+            "canonical_lexemes": coverage[5],
+            "senses_with_english_gloss": coverage[6],
+            "senses_with_finnish_gloss": coverage[7],
         },
         "form_validation": verdicts,
         "invalid_zh_glosses": invalid_zh,
         "sources": [
-            {"name": name, "version": version, "license": license_, "imported_at": imported_at}
-            for name, version, license_, imported_at in sources
+            {
+                "name": name,
+                "version": version,
+                "license": license_,
+                "imported_at": imported_at,
+                "url": url if url and url.startswith(("https://", "http://")) else None,
+                "sha256": checksum or None,
+                "assets": [
+                    {
+                        "name": asset["name"],
+                        "sha256": asset["sha256"],
+                        "url": asset["url"] if asset["url"].startswith(("https://", "http://")) else None,
+                    }
+                    for asset in assets
+                ],
+            }
+            for name, version, license_, imported_at, url, checksum, assets in sources
         ],
     }
 

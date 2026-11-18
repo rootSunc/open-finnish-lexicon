@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
@@ -140,7 +142,7 @@ class PurePythonOptimizationTests(unittest.TestCase):
             self.assertEqual(cedict_rows[("Finland", False)], "芬兰")
             self.assertEqual(cedict_rows[("merely", False)], "仅仅")
 
-    def test_package_release_offline_zst_and_sha256sums(self):
+    def test_package_release_rejects_unbound_offline_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             dist = Path(tmpdir)
             (dist / "fi.sqlite").write_bytes(b"SQLite format 3\x00" + b"x" * 4096)
@@ -149,25 +151,9 @@ class PurePythonOptimizationTests(unittest.TestCase):
                 json.dumps({"counts": {"lexicon.lexeme": 1}, "invalid_zh_glosses": 0}),
                 encoding="utf-8",
             )
-            rc = main(
-                [
-                    "package-release",
-                    "--dist-dir",
-                    str(dist),
-                    "--level",
-                    "3",
-                    "--no-export",
-                ]
-            )
-            self.assertEqual(rc, 0)
-            self.assertTrue((dist / "fi.sqlite.zst").is_file())
-            self.assertTrue((dist / "fi.jsonl.zst").is_file())
-            self.assertTrue((dist / "release-manifest.json").is_file())
-            checksums_lines = (dist / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
-            self.assertEqual(len(checksums_lines), 4)
-            for line in checksums_lines:
-                digest, fname = line.split("  ", 1)
-                self.assertEqual(digest, sha256_file(dist / fname))
+            with self.assertRaisesRegex(SystemExit, "one package-release snapshot"):
+                main(["package-release", "--dist-dir", str(dist), "--no-export"])
+            self.assertFalse((dist / "SHA256SUMS").exists())
 
 
 @pytest.mark.db
@@ -176,6 +162,39 @@ class DatabaseOptimizationIntegrationTests(unittest.TestCase):
         with psycopg.connect(get_test_database_url()) as conn:
             conn.execute(f"truncate {DATA_TABLES} restart identity cascade")
             conn.commit()
+
+    def test_package_release_exports_one_snapshot_and_repackages_offline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dist = root / "dist"
+            command = ["package-release", "--dist-dir", str(dist), "--level", "1"]
+            with self.assertRaisesRegex(SystemExit, "empty lexicon"):
+                main(command)
+            self.assertFalse((dist / "SHA256SUMS").exists())
+
+            source = root / "kaikki.jsonl"
+            source.write_text(json.dumps({
+                "word": "juosta", "lang": "Finnish", "lang_code": "fi", "pos": "verb",
+                "senses": [{"id": "release-test-sense", "glosses": ["run"]}],
+            }) + "\n", encoding="utf-8")
+            self.assertEqual(main(["ingest-kaikki", "--input", str(source)]), 0)
+            self.assertEqual(main([*command, "--code-revision", "test-revision"]), 0)
+
+            report = json.loads((dist / "fi.sqlite.report.json").read_text(encoding="utf-8"))
+            manifest = json.loads((dist / "release-manifest.json").read_text(encoding="utf-8"))
+            header = json.loads((dist / "fi.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(manifest["snapshot"], report["snapshot"])
+            self.assertEqual(manifest["snapshot"]["code_revision"], "test-revision")
+            self.assertEqual(header["_export"]["build_id"], manifest["snapshot"]["build_id"])
+            for line in (dist / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+                digest, fname = line.split("  ", 1)
+                self.assertEqual(digest, sha256_file(dist / fname))
+            self.assertEqual(main([*command, "--no-export", "--overwrite"]), 0)
+
+            with (dist / "fi.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+            with self.assertRaisesRegex(SystemExit, "does not match the release report"):
+                main([*command, "--no-export", "--overwrite"])
 
     def test_form_of_isolation_chinese_rescue_semrels_and_collocation_filter(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -488,6 +507,15 @@ class DatabaseOptimizationIntegrationTests(unittest.TestCase):
                     "pos": "noun",
                     "senses": [{"id": "r1", "glosses": ["bank"]}],
                 },
+                {
+                    "word": "pankki",
+                    "lang": "Finnish",
+                    "pos": "noun",
+                    "senses": [
+                        {"id": "p2", "glosses": ["bank (e.g. of memory)"]},
+                        {"id": "p1", "glosses": ["bank (institution for lending money)"]},
+                    ],
+                },
             ]
             kaikki_path.write_text(
                 "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kaikki_rows),
@@ -498,12 +526,20 @@ class DatabaseOptimizationIntegrationTests(unittest.TestCase):
             fiwn_dir = root / "fiwn"
             fiwn_dir.mkdir()
             (fiwn_dir / "fiwn-wsenses.tsv").write_text(
-                "fi:n11653599\tkuusi\t0\nfi:n13746575\tkuusi\t0\n",
+                "fi:n11653599\tkuusi\t0\nfi:n13746575\tkuusi\t0\n"
+                "fi:n02787772\tpankki\t0\nfi:n08420278\tpankki\t0\n",
                 encoding="utf-8",
             )
             (fiwn_dir / "fiwn-transls.tsv").write_text(
                 "fi:n11653599\tkuusi\ten-3.0:n11653599\tspruce\tsynonym\n"
-                "fi:n13746575\tkuusi\ten-3.0:n13746575\tsix\tsynonym\n",
+                "fi:n13746575\tkuusi\ten-3.0:n13746575\tsix\tsynonym\n"
+                "fi:n02787772\tpankki\ten-3.0:n02787772\tbank\tsynonym\n"
+                "fi:n08420278\tpankki\ten-3.0:n08420278\tbank\tsynonym\n",
+                encoding="utf-8",
+            )
+            (fiwn_dir / "fiwn-synsets.tsv").write_text(
+                "fi:n02787772\tn\t0\t0\ta building for business\n"
+                "fi:n08420278\tn\t0\t0\tan institution lending money\n",
                 encoding="utf-8",
             )
             (fiwn_dir / "fiwn-lexrels.tsv").write_text("", encoding="utf-8")
@@ -520,7 +556,9 @@ class DatabaseOptimizationIntegrationTests(unittest.TestCase):
             omw_path = root / "omw.tab"
             omw_path.write_text(
                 "11653599-n\tcmn:lemma\t云杉\n"
-                "13746575-n\tcmn:lemma\t六\n",
+                "13746575-n\tcmn:lemma\t六\n"
+                "02787772-n\tcmn:lemma\t银行大厦\n"
+                "08420278-n\tcmn:lemma\t银行\n",
                 encoding="utf-8",
             )
             self.assertEqual(main(["ingest-omw-zh", "--input", str(omw_path)]), 0)
@@ -535,6 +573,13 @@ class DatabaseOptimizationIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(main(["ingest-cedict-zh", "--input", str(cedict_path)]), 0)
             self.assertEqual(main(["refresh"]), 0)
+            sqlite_path = root / "fi.sqlite"
+            self.assertEqual(main(["export-sqlite", "--output", str(sqlite_path)]), 0)
+            with closing(sqlite3.connect(sqlite_path)) as export_db:
+                summary = export_db.execute(
+                    "select primary_gloss_en, primary_gloss_zh from v_lexeme_summary where lemma = 'pankki'"
+                ).fetchone()
+                self.assertEqual(summary, ("bank (e.g. of memory)", None))
 
         with psycopg.connect(get_test_database_url()) as conn:
             rows = {
@@ -551,6 +596,8 @@ class DatabaseOptimizationIntegrationTests(unittest.TestCase):
             # OMW synset bridge disambiguated both senses of ``kuusi`` AND beat cedict_zh!
             self.assertEqual(rows[("kuusi", "k1")], ("云杉", "omw_zh-rule"))
             self.assertEqual(rows[("kuusi", "k2")], ("六", "omw_zh-rule"))
+            self.assertEqual(rows[("pankki", "p1")], ("银行", "omw_zh-rule"))
+            self.assertNotIn(("pankki", "p2"), rows)
             # CC-CEDICT multi-synonym consensus matched ``vain``!
             self.assertEqual(rows[("vain", "v1")], ("仅仅；只是", "cedict_zh-rule"))
             # Ambiguous single-word ``bank`` on ``ranta`` was safely blocked!

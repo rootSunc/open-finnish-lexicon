@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import closing
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 import hashlib
 import importlib
+from importlib import resources
 from importlib.metadata import PackageNotFoundError, version
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
+from tempfile import TemporaryDirectory
+from typing import Any
+from uuid import uuid4
 
-from open_finnish_lexicon.export import export_jsonl, export_sqlite
+from open_finnish_lexicon.config import get_pipeline_settings
+from open_finnish_lexicon.db import connect
+from open_finnish_lexicon.export import EXPORT_SCHEMA_VERSION, export_jsonl, export_sqlite
 from open_finnish_lexicon.quality.report import collect_data_quality_metrics
+from open_finnish_lexicon.sources.registry import SYNC_SOURCE_ORDER
 
 
 @dataclass(frozen=True)
@@ -91,6 +100,7 @@ def compress_zstd(
                 [
                     zstd_bin,
                     "-T0",
+                    *(["--ultra"] if level > 19 else []),
                     f"-{level}",
                     "-q",
                     "-f",
@@ -100,6 +110,7 @@ def compress_zstd(
                 ],
                 check=True,
             )
+            subprocess.run([zstd_bin, "-q", "-t", str(temp_path)], check=True)
         else:
             try:
                 zstd_mod = importlib.import_module("compression.zstd")
@@ -109,6 +120,9 @@ def compress_zstd(
                 ) from exc
             with input_path.open("rb") as src, zstd_mod.open(temp_path, "wb", level=level) as dst:
                 shutil.copyfileobj(src, dst, length=1024 * 1024)
+            with zstd_mod.open(temp_path, "rb") as restored:
+                if hashlib.file_digest(restored, "sha256").hexdigest() != sha256_file(input_path):
+                    raise ValueError("compressed archive does not match its input")
         temp_path.replace(target)
     except BaseException:
         temp_path.unlink(missing_ok=True)
@@ -116,112 +130,142 @@ def compress_zstd(
     return target
 
 
-def package_release(
-    dist_dir: Path,
+def _export_snapshot(
+    sqlite_path: Path,
+    jsonl_path: Path,
+    report_path: Path,
     *,
-    prefix: str = "fi",
-    level: int = 19,
-    export_missing: bool = True,
-    pure_jsonl: bool = False,
-    keep_uncompressed: bool = True,
-    overwrite: bool = False,
-) -> ReleaseBundle:
-    """Create ``<prefix>.sqlite.zst``, ``<prefix>.jsonl.zst``, ``release-manifest.json``,
-    and ``SHA256SUMS`` inside ``dist_dir``."""
-
-    dist_dir.mkdir(parents=True, exist_ok=True)
-    sqlite_path = dist_dir / f"{prefix}.sqlite"
-    jsonl_path = dist_dir / f"{prefix}.jsonl"
-    report_path = dist_dir / f"{prefix}.sqlite.report.json"
-    sqlite_zst = dist_dir / f"{prefix}.sqlite.zst"
-    jsonl_zst = dist_dir / f"{prefix}.jsonl.zst"
-    manifest_path = dist_dir / "release-manifest.json"
-    checksums_path = dist_dir / "SHA256SUMS"
-
-    if not overwrite:
-        for out in (sqlite_zst, jsonl_zst, manifest_path, checksums_path):
-            if out.exists():
-                raise FileExistsError(f"{out} already exists; pass --overwrite to replace")
-
-    if not sqlite_path.is_file():
-        if not export_missing:
-            raise FileNotFoundError(f"missing {sqlite_path} (--no-export was specified)")
-        export_sqlite(sqlite_path, overwrite=True)
-
-    if not jsonl_path.is_file():
-        if not export_missing:
-            raise FileNotFoundError(f"missing {jsonl_path} (--no-export was specified)")
+    pure_jsonl: bool,
+    code_revision: str | None,
+    dataset_version: str | None,
+) -> None:
+    build_id = uuid4().hex
+    with connect() as conn:
+        conn.execute("set transaction isolation level repeatable read read only")
+        metrics = collect_data_quality_metrics(connection=conn)
+        if not metrics["counts"]["lexicon.lexeme"] or not metrics["counts"]["lexicon.lexeme_sense"]:
+            raise ValueError("cannot package an empty lexicon; populate the database first")
+        export_sqlite(sqlite_path, connection=conn, build_id=build_id)
         export_jsonl(
             jsonl_path,
-            overwrite=True,
+            connection=conn,
+            build_id=build_id,
             include_sources_header=not pure_jsonl,
         )
+    metrics["snapshot"] = {
+        "build_id": build_id,
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "package_version": _package_version(),
+        "code_revision": code_revision,
+        "dataset_version": dataset_version,
+        "profile": get_pipeline_settings().data_profile,
+        "jsonl_sources_header": not pure_jsonl,
+        "raw_sha256": {path.name: sha256_file(path) for path in (sqlite_path, jsonl_path)},
+    }
+    active_sources = {source["name"] for source in metrics["sources"]}
+    metrics["skipped_sources"] = [name for name in SYNC_SOURCE_ORDER if name not in active_sources]
+    _write_text_atomic(report_path, json.dumps(metrics, ensure_ascii=False, indent=2, default=str) + "\n")
 
-    if not report_path.is_file():
-        if not export_missing:
-            raise FileNotFoundError(f"missing {report_path} (--no-export was specified)")
-        metrics = collect_data_quality_metrics()
-        _write_text_atomic(
-            report_path,
-            json.dumps(metrics, ensure_ascii=False, indent=2, default=str) + "\n",
-        )
 
-    sqlite_raw_size = sqlite_path.stat().st_size
-    jsonl_raw_size = jsonl_path.stat().st_size
+def _validate_snapshot(sqlite_path: Path, jsonl_path: Path, report_path: Path) -> dict[str, Any]:
+    for path in (sqlite_path, jsonl_path, report_path):
+        if not path.is_file():
+            raise FileNotFoundError(f"missing release input {path}")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    snapshot = report.get("snapshot", {}) if isinstance(report, dict) else {}
+    if not snapshot.get("build_id") or snapshot.get("schema_version") != EXPORT_SCHEMA_VERSION:
+        raise ValueError("inputs must come from one package-release snapshot; regenerate without --no-export")
+    for path in (sqlite_path, jsonl_path):
+        if sha256_file(path) != snapshot.get("raw_sha256", {}).get(path.name):
+            raise ValueError(f"{path.name} does not match the release report; regenerate without --no-export")
 
-    compress_zstd(sqlite_path, sqlite_zst, level=level, overwrite=overwrite)
-    compress_zstd(jsonl_path, jsonl_zst, level=level, overwrite=overwrite)
+    counts = report.get("counts", {})
+    expected = tuple(counts.get(f"lexicon.{table}") for table in ("lexeme", "lexeme_sense", "form"))
+    if not expected[0] or not expected[1]:
+        raise ValueError("cannot package an empty lexicon")
+    with closing(sqlite3.connect(sqlite_path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        if db.execute("pragma user_version").fetchone() != (EXPORT_SCHEMA_VERSION,):
+            raise ValueError("SQLite schema version does not match the release report")
+        if db.execute("select build_id from export_metadata").fetchall() != [(snapshot["build_id"],)]:
+            raise ValueError("SQLite build ID does not match the release report")
+        if db.execute("pragma quick_check").fetchall() != [("ok",)]:
+            raise ValueError("SQLite failed quick_check")
+        if db.execute("pragma foreign_key_check").fetchone() is not None:
+            raise ValueError("SQLite has broken foreign keys")
+        actual = db.execute(
+            "select (select count(*) from lexeme), (select count(*) from sense), (select count(*) from form)"
+        ).fetchone()
+        if actual != expected:
+            raise ValueError("SQLite core counts do not match the release report")
 
-    sqlite_zst_size = sqlite_zst.stat().st_size
-    jsonl_zst_size = jsonl_zst.stat().st_size
-    report_size = report_path.stat().st_size
+    lexemes = senses = forms = 0
+    with jsonl_path.open(encoding="utf-8") as handle:
+        if snapshot.get("jsonl_sources_header"):
+            header = json.loads(next(handle, "{}"))
+            if header.get("_export") != {
+                "build_id": snapshot["build_id"],
+                "schema_version": EXPORT_SCHEMA_VERSION,
+            }:
+                raise ValueError("JSONL build ID or schema version does not match the release report")
+        for line in handle:
+            row = json.loads(line)
+            lexemes += 1
+            senses += len(row["senses"])
+            forms += len(row["forms"])
+    if (lexemes, senses, forms) != expected:
+        raise ValueError("JSONL core counts do not match the release report")
+    return report
 
-    artifacts = (
-        ArtifactEntry(
-            filename=sqlite_zst.name,
-            sha256=sha256_file(sqlite_zst),
-            size_bytes=sqlite_zst_size,
-            uncompressed_filename=sqlite_path.name,
-            uncompressed_size_bytes=sqlite_raw_size,
-            compression_ratio=round(sqlite_zst_size / max(sqlite_raw_size, 1), 4),
-        ),
-        ArtifactEntry(
-            filename=jsonl_zst.name,
-            sha256=sha256_file(jsonl_zst),
-            size_bytes=jsonl_zst_size,
-            uncompressed_filename=jsonl_path.name,
-            uncompressed_size_bytes=jsonl_raw_size,
-            compression_ratio=round(jsonl_zst_size / max(jsonl_raw_size, 1), 4),
-        ),
-        ArtifactEntry(
-            filename=report_path.name,
-            sha256=sha256_file(report_path),
-            size_bytes=report_size,
-        ),
+def _compress_artifact(path: Path, target: Path, *, level: int) -> ArtifactEntry:
+    compress_zstd(path, target, level=level)
+    raw_size = path.stat().st_size
+    size = target.stat().st_size
+    return ArtifactEntry(
+        filename=target.name,
+        sha256=sha256_file(target),
+        size_bytes=size,
+        uncompressed_filename=path.name,
+        uncompressed_size_bytes=raw_size,
+        compression_ratio=round(size / raw_size, 4),
     )
 
-    report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+
+def _assemble_release(
+    dist_dir: Path,
+    sqlite_path: Path,
+    jsonl_path: Path,
+    report_path: Path,
+    *,
+    level: int,
+) -> ReleaseBundle:
+    report_payload = _validate_snapshot(sqlite_path, jsonl_path, report_path)
+    sqlite_zst = dist_dir / f"{sqlite_path.name}.zst"
+    jsonl_zst = dist_dir / f"{jsonl_path.name}.zst"
+    manifest_path = dist_dir / "release-manifest.json"
+    checksums_path = dist_dir / "SHA256SUMS"
+    notice_path = dist_dir / "DATA-NOTICE.md"
+    notice_path.write_text(
+        resources.files("open_finnish_lexicon").joinpath(notice_path.name).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    artifacts = (
+        _compress_artifact(sqlite_path, sqlite_zst, level=level),
+        _compress_artifact(jsonl_path, jsonl_zst, level=level),
+        ArtifactEntry(report_path.name, sha256_file(report_path), report_path.stat().st_size),
+        ArtifactEntry(notice_path.name, sha256_file(notice_path), notice_path.stat().st_size),
+    )
     manifest_payload = {
         "package": "open-finnish-lexicon",
         "package_version": _package_version(),
         "generated_at": datetime.now(UTC).isoformat(),
+        "snapshot": report_payload["snapshot"],
         "compression": {
             "algorithm": "zstd",
             "level": level,
         },
         "artifacts": [
-            {
-                key: value
-                for key, value in {
-                    "filename": item.filename,
-                    "sha256": item.sha256,
-                    "size_bytes": item.size_bytes,
-                    "uncompressed_filename": item.uncompressed_filename,
-                    "uncompressed_size_bytes": item.uncompressed_size_bytes,
-                    "compression_ratio": item.compression_ratio,
-                }.items()
-                if value is not None
-            }
+            {key: value for key, value in asdict(item).items() if value is not None}
             for item in artifacts
         ],
         "summary": {
@@ -230,6 +274,7 @@ def package_release(
             "form_validation": report_payload.get("form_validation", {}),
             "invalid_zh_glosses": report_payload.get("invalid_zh_glosses", 0),
             "sources": report_payload.get("sources", []),
+            "skipped_sources": report_payload.get("skipped_sources", []),
         },
     }
     _write_text_atomic(
@@ -248,10 +293,6 @@ def package_release(
     checksum_lines = "".join(f"{digest}  {name}\n" for digest, name in checksum_items)
     _write_text_atomic(checksums_path, checksum_lines)
 
-    if not keep_uncompressed:
-        sqlite_path.unlink(missing_ok=True)
-        jsonl_path.unlink(missing_ok=True)
-
     return ReleaseBundle(
         dist_dir=dist_dir,
         sqlite_zst=sqlite_zst,
@@ -260,6 +301,77 @@ def package_release(
         manifest_path=manifest_path,
         checksums_path=checksums_path,
         artifacts=artifacts,
+    )
+
+
+def package_release(
+    dist_dir: Path,
+    *,
+    prefix: str = "fi",
+    level: int = 19,
+    export_missing: bool = True,
+    pure_jsonl: bool = False,
+    keep_uncompressed: bool = True,
+    overwrite: bool = False,
+    code_revision: str | None = None,
+    dataset_version: str | None = None,
+) -> ReleaseBundle:
+    """Export one database snapshot, or package a verified previous export offline."""
+
+    if not prefix or not prefix.replace("-", "").replace("_", "").isalnum():
+        raise ValueError("release prefix must contain only letters, numbers, hyphens or underscores")
+    if not 1 <= level <= 22:
+        raise ValueError("zstd compression level must be between 1 and 22")
+    if not export_missing and (pure_jsonl or code_revision is not None or dataset_version is not None):
+        raise ValueError("--pure-jsonl, --code-revision and --dataset-version require a fresh export")
+
+    new_directory = not dist_dir.exists()
+    stage_parent = dist_dir.parent if new_directory else dist_dir
+    stage_parent.mkdir(parents=True, exist_ok=True)
+    raw_names = (f"{prefix}.sqlite", f"{prefix}.jsonl")
+    report_name = f"{prefix}.sqlite.report.json"
+    outputs = [
+        *(f"{name}.zst" for name in raw_names), "DATA-NOTICE.md", "release-manifest.json", "SHA256SUMS",
+    ]
+    if export_missing:
+        outputs[:0] = [*raw_names, report_name] if keep_uncompressed else [report_name]
+    if not overwrite:
+        checked_names = [*outputs, *raw_names] if export_missing and not keep_uncompressed else outputs
+        for name in checked_names:
+            if (dist_dir / name).exists():
+                raise FileExistsError(f"{dist_dir / name} already exists; pass --overwrite to replace")
+
+    with TemporaryDirectory(prefix=".ofl-release-", dir=stage_parent) as temp_dir:
+        stage = Path(temp_dir)
+        inputs = stage if export_missing else dist_dir
+        sqlite_path, jsonl_path = (inputs / name for name in raw_names)
+        report_path = inputs / report_name
+        if export_missing:
+            _export_snapshot(
+                sqlite_path, jsonl_path, report_path,
+                pure_jsonl=pure_jsonl, code_revision=code_revision, dataset_version=dataset_version,
+            )
+        bundle = _assemble_release(stage, sqlite_path, jsonl_path, report_path, level=level)
+        if new_directory:
+            if not keep_uncompressed:
+                sqlite_path.unlink()
+                jsonl_path.unlink()
+            stage.rename(dist_dir)
+        else:
+            # Keep SHA256SUMS last so readers can verify a complete set after replacement.
+            for name in outputs:
+                (stage / name).replace(dist_dir / name)
+            if not keep_uncompressed:
+                for name in raw_names:
+                    (dist_dir / name).unlink(missing_ok=True)
+    return replace(
+        bundle,
+        dist_dir=dist_dir,
+        sqlite_zst=dist_dir / bundle.sqlite_zst.name,
+        jsonl_zst=dist_dir / bundle.jsonl_zst.name,
+        report_path=dist_dir / report_name,
+        manifest_path=dist_dir / bundle.manifest_path.name,
+        checksums_path=dist_dir / bundle.checksums_path.name,
     )
 
 

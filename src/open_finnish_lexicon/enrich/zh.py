@@ -112,7 +112,9 @@ def rebuild_chinese_glosses() -> None:
             )
             select selection.target_sense_id,
                    selection.gloss_zh,
-                   candidate.source_name || '-' || selection.selected_by,
+                   case when candidate.candidate_payload->>'pivot_en' = 'closed_class_primary'
+                        then 'project-rule'
+                        else candidate.source_name || '-' || selection.selected_by end,
                    'v1',
                    true
             from semantic.zh_gloss_selection selection

@@ -631,8 +631,8 @@ class TatoebaLoaderTests(unittest.TestCase):
             (Path(temp_dir) / "sentences.csv").write_text(
                 "\n".join(
                     [
-                        "800004\teng\tZorbla runs quickly.",
-                        "700004\tcmn\t佐布拉跑得很快。",
+                        "800004\teng\tZorbla runs quickly.\tenglish-writer\t2026-05-01\t2026-05-01",
+                        "700004\tcmn\t佐布拉跑得很快。\tmandarin-writer\t2026-05-01\t2026-05-01",
                     ]
                 )
                 + "\n"
@@ -645,7 +645,7 @@ class TatoebaLoaderTests(unittest.TestCase):
         with psycopg.connect(get_test_database_url()) as conn:
             translation_row = conn.execute(
                 """
-                select zet.text_zh, zet.generation_method
+                select zet.text_zh, zet.generation_method, e.provenance
                 from zh_layer.zh_example_translation zet
                 join lexicon.example e on e.id = zet.example_id
                 where e.text_fi = 'Zorblaa nopeasti.'
@@ -654,6 +654,13 @@ class TatoebaLoaderTests(unittest.TestCase):
 
         self.assertEqual(translation_row[0], "佐布拉跑得很快。")
         self.assertEqual(translation_row[1], "tatoeba-direct-zh")
+        provenance = translation_row[2]
+        self.assertEqual(provenance["fi"]["contributor"], "tester")
+        self.assertEqual(provenance["en"]["contributor"], "english-writer")
+        self.assertEqual(provenance["zh"]["contributor"], "mandarin-writer")
+        self.assertEqual(provenance["zh"]["url"], "https://tatoeba.org/en/sentences/show/700004")
+        self.assertFalse(provenance["en"]["via_pivot"])
+        self.assertTrue(provenance["zh"]["via_pivot"])
 
     def test_tatoeba_loader_uses_companion_links_and_sentences_for_english_translations(self):
         with psycopg.connect(get_test_database_url()) as conn:
