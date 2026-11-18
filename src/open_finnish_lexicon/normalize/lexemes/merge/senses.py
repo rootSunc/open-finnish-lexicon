@@ -1,5 +1,7 @@
 """Merge lexicon sense rows between lexemes."""
 
+from psycopg import sql
+
 from open_finnish_lexicon.normalize.lexemes.merge.semantic_senses import _merge_semantic_sense_rows
 
 
@@ -175,17 +177,16 @@ def _merge_sense_rows(conn, source_lexeme_id: int, target_lexeme_id: int) -> Non
             (target_sense_id, source_sense_id),
         )
         conn.execute("delete from lexicon.usage_warning where sense_id = %s", (source_sense_id,))
-        for table_name in (
-            "zh_layer.zh_gloss",
-            "zh_layer.zh_note",
-            "zh_layer.zh_warning",
+        for schema_name, table_name in (
+            ("zh_layer", "zh_gloss"),
+            ("zh_layer", "zh_note"),
+            ("zh_layer", "zh_warning"),
         ):
             conn.execute(
-                f"""
-                update {table_name}
-                set sense_id = %s
-                where sense_id = %s
-                """,
+                sql.SQL("update {}.{} set sense_id = %s where sense_id = %s").format(
+                    sql.Identifier(schema_name),
+                    sql.Identifier(table_name),
+                ),
                 (target_sense_id, source_sense_id),
             )
         conn.execute("delete from lexicon.lexeme_sense where id = %s", (source_sense_id,))

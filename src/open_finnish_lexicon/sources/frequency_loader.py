@@ -1,8 +1,12 @@
-import csv
+from __future__ import annotations
+
 from collections import defaultdict
 from collections.abc import Iterable
+import csv
 from dataclasses import dataclass
 from pathlib import Path
+
+import psycopg
 
 from open_finnish_lexicon.db import connection_scope
 from open_finnish_lexicon.normalize.lexemes import normalize_part_of_speech
@@ -53,15 +57,20 @@ def iter_frequency_entries(input_path: Path) -> Iterable[FrequencyEntry]:
                 )
             return
 
-        for line in handle:
+        for line_no, line in enumerate(handle, start=1):
             stripped = line.strip()
             if not stripped:
                 continue
-            term, raw_count = stripped.rsplit(maxsplit=1)
+            parts = stripped.rsplit(maxsplit=1)
+            if len(parts) != 2:
+                raise ValueError(f"malformed frequency line {input_path}:{line_no}: {stripped!r}")
+            term, raw_count = parts
             yield FrequencyEntry(term=term, raw_count=int(raw_count))
 
 
-def _load_exact_lexeme_matches(conn, entries: list[FrequencyEntry]) -> dict[tuple[str, str], int]:
+def _load_exact_lexeme_matches(
+    conn: psycopg.Connection, entries: list[FrequencyEntry]
+) -> dict[tuple[str, str], int]:
     exact_rows = [entry for entry in entries if entry.lemma and entry.pos]
     if not exact_rows:
         return {}
@@ -76,12 +85,21 @@ def _load_exact_lexeme_matches(conn, entries: list[FrequencyEntry]) -> dict[tupl
         (lemmas,),
     ).fetchall()
     return {
-        (lemma, part_of_speech): lexeme_id
+        (str(lemma), str(part_of_speech)): int(lexeme_id)
         for lexeme_id, lemma, part_of_speech in rows
     }
 
 
-def _load_preferred_lemma_matches(conn, entries: list[FrequencyEntry]) -> dict[str, int]:
+_CLOSED_CLASS_LEMMA_POS = {
+    "ei": "verb",
+    "olla": "verb",
+}
+_FUNCTION_WORD_POS = frozenset({"pron", "conj", "aux", "adp"})
+
+
+def _load_preferred_lemma_matches(
+    conn: psycopg.Connection, entries: list[FrequencyEntry]
+) -> dict[str, int]:
     lemma_rows = [entry for entry in entries if not entry.lemma and entry.term]
     if not lemma_rows:
         return {}
@@ -92,31 +110,57 @@ def _load_preferred_lemma_matches(conn, entries: list[FrequencyEntry]) -> dict[s
         select
             l.id,
             l.lemma,
-            count(ls.id) as sense_count,
-            count(f.id) as form_count
+            l.part_of_speech,
+            (
+                select count(*)
+                from lexicon.lexeme_sense ls
+                where ls.lexeme_id = l.id
+                  and not ('form-of' = any(ls.labels))
+            ) as sense_count,
+            (
+                select count(*)
+                from lexicon.form f
+                where f.lexeme_id = l.id
+            ) as form_count
         from lexicon.lexeme l
-        left join lexicon.lexeme_sense ls on ls.lexeme_id = l.id
-        left join lexicon.form f on f.lexeme_id = l.id
         where l.lemma = any(%s)
-        group by l.id, l.lemma
+          and l.is_lemma = true
         """,
         (lemmas,),
     ).fetchall()
 
-    grouped: dict[str, list[tuple[int, int, int]]] = defaultdict(list)
-    for lexeme_id, lemma, sense_count, form_count in rows:
-        grouped[lemma].append((lexeme_id, sense_count, form_count))
+    grouped: dict[str, list[tuple[int, str, int, int]]] = defaultdict(list)
+    for lexeme_id, lemma, part_of_speech, sense_count, form_count in rows:
+        grouped[str(lemma)].append(
+            (int(lexeme_id), str(part_of_speech), int(sense_count), int(form_count))
+        )
 
     preferred_matches: dict[str, int] = {}
     for lemma, candidates in grouped.items():
-        sense_bearing = [candidate for candidate in candidates if candidate[1] > 0]
-        if len(sense_bearing) != 1:
-            continue
-        preferred_matches[lemma] = sense_bearing[0][0]
+        sense_bearing = [candidate for candidate in candidates if candidate[2] > 0]
+        if len(sense_bearing) == 1:
+            preferred_matches[lemma] = sense_bearing[0][0]
+        elif len(sense_bearing) > 1:
+            # Prefer closed-class/function-word lemmas over metalinguistic noun
+            # homographs (e.g. ``ei`` verb over ``ei`` noun "a no", ``minä`` pron
+            # over ``minä`` noun "the ego"), then disambiguate by richness.
+            best = max(
+                sense_bearing,
+                key=lambda c: (
+                    1 if _CLOSED_CLASS_LEMMA_POS.get(lemma) == c[1] else 0,
+                    1 if c[1] in _FUNCTION_WORD_POS else 0,
+                    c[2],
+                    c[3],
+                    -c[0],
+                ),
+            )
+            preferred_matches[lemma] = best[0]
     return preferred_matches
 
 
-def _resolve_frequency_rows(conn, entries: list[FrequencyEntry]) -> list[tuple[int, int, float]]:
+def _resolve_frequency_rows(
+    conn: psycopg.Connection, entries: list[FrequencyEntry]
+) -> list[tuple[int, int, float]]:
     exact_matches = _load_exact_lexeme_matches(conn, entries)
     preferred_lemma_matches = _load_preferred_lemma_matches(conn, entries)
     normalized_terms = {entry.term.casefold() for entry in entries if not entry.lemma and entry.term}
@@ -174,13 +218,7 @@ def _validate_frequency_replacement(
     input_row_count: int,
     resolved_rows: list[tuple[int, int, float]],
 ) -> None:
-    """Reject an implausibly sparse full-source replacement before mutating data.
-
-    Frequency ingestion replaces the previous ``frequency`` source and clears
-    ``lexeme.frequency_rank``. A malformed download, a fixture file, or a
-    dictionary/source mismatch must therefore fail closed instead of silently
-    reducing the ranking corpus to a handful of rows.
-    """
+    """Reject an implausibly sparse full-source replacement before mutating data."""
 
     resolved_count = len(resolved_rows)
     if input_row_count == 0:
@@ -191,17 +229,20 @@ def _validate_frequency_replacement(
             "refusing to replace existing data"
         )
 
-    existing_count = conn.execute(
+    existing_row = conn.execute(
         """
         select count(distinct lexeme_id)
         from lexicon.frequency_signal
         where source_name = any(%s)
         """,
         (list(LEGACY_FREQUENCY_SOURCE_NAMES),),
-    ).fetchone()[0]
-    existing_count = int(existing_count or 0)
+    ).fetchone()
+    existing_count = int(existing_row[0] or 0) if existing_row else 0
 
-    if input_row_count >= LARGE_FREQUENCY_INPUT_ROWS and resolved_count < MIN_LARGE_INPUT_RESOLVED_ROWS:
+    if (
+        input_row_count >= LARGE_FREQUENCY_INPUT_ROWS
+        and resolved_count < MIN_LARGE_INPUT_RESOLVED_ROWS
+    ):
         raise ValueError(
             f"frequency input has {input_row_count} rows but matched only {resolved_count} lexemes; "
             "refusing a likely source/schema mismatch"
@@ -217,7 +258,7 @@ def ingest_frequency(
     input_path: Path,
     *,
     entries: list[FrequencyEntry] | None = None,
-    connection=None,
+    connection: psycopg.Connection | None = None,
 ) -> None:
     entries = list(iter_frequency_entries(input_path)) if entries is None else entries
     owns_connection = connection is None
@@ -240,24 +281,47 @@ def ingest_frequency(
 
         ranked_rows = sorted(resolved_rows, key=lambda row: (-row[1], row[0]))
 
+        conn.execute("drop table if exists tmp_frequency_resolved")
+        conn.execute(
+            """
+            create temporary table tmp_frequency_resolved (
+                rank integer not null,
+                lexeme_id bigint primary key,
+                raw_count bigint not null,
+                normalized_score numeric(8, 5) not null
+            ) on commit drop
+            """
+        )
         with conn.cursor() as cursor:
-            cursor.executemany(
+            with cursor.copy(
                 """
-                insert into lexicon.frequency_signal (lexeme_id, source_name, raw_count, normalized_score)
-                values (%s, %s, %s, %s)
+                copy tmp_frequency_resolved (rank, lexeme_id, raw_count, normalized_score)
+                from stdin
+                """
+            ) as copy:
+                for rank, (lexeme_id, raw_count, normalized_score) in enumerate(
+                    ranked_rows, start=1
+                ):
+                    copy.write_row((rank, lexeme_id, raw_count, round(normalized_score, 5)))
+
+            cursor.execute(
+                """
+                insert into lexicon.frequency_signal (
+                    lexeme_id, source_name, raw_count, normalized_score
+                )
+                select lexeme_id, %s, raw_count, normalized_score
+                from tmp_frequency_resolved
+                order by rank
                 """,
-                [
-                    (lexeme_id, FREQUENCY_SOURCE_NAME, raw_count, normalized_score)
-                    for lexeme_id, raw_count, normalized_score in ranked_rows
-                ],
+                (FREQUENCY_SOURCE_NAME,),
             )
-            cursor.executemany(
+            cursor.execute(
                 """
-                update lexicon.lexeme
-                set frequency_rank = %s
-                where id = %s
-                """,
-                [(rank, lexeme_id) for rank, (lexeme_id, _raw_count, _normalized_score) in enumerate(ranked_rows, start=1)],
+                update lexicon.lexeme l
+                set frequency_rank = t.rank
+                from tmp_frequency_resolved t
+                where l.id = t.lexeme_id
+                """
             )
         if owns_connection:
             conn.commit()

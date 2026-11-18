@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
@@ -9,9 +11,7 @@ from open_finnish_lexicon.sources.tatoeba_loader import (
 )
 from open_finnish_lexicon.sources.warehouse import (
     clear_source_file_documents,
-    upsert_source_file,
-    upsert_source_registry,
-    upsert_source_release,
+    prepare_pending_source_snapshot,
 )
 
 
@@ -25,36 +25,26 @@ def stage_tatoeba_rows(
     checksum_sha256: str = "",
 ) -> int:
     source_kind = get_tatoeba_source_kind(input_path)
-    if next(iter_tatoeba_entries(input_path), None) is None:
-        raise ValueError("Tatoeba input contains no valid Finnish entries; refusing to replace existing examples")
+    entries = list(iter_tatoeba_entries(input_path))
+    if not entries:
+        raise ValueError(
+            "Tatoeba input contains no valid Finnish entries; refusing to replace existing examples"
+        )
+    sentence_ids = {entry.sentence_id for entry in entries if entry.sentence_id is not None}
+    translations_by_sentence_id = load_tatoeba_translations(input_path, sentence_ids)
+
     with connect() as conn:
-        source_registry_id = upsert_source_registry(
+        source_file_id = prepare_pending_source_snapshot(
             conn,
             name="tatoeba",
             source_kind=source_kind,
             version=version,
             source_url=source_url,
-            defer_activation=True,
-        )
-        upsert_source_release(
-            conn,
-            source_registry_id=source_registry_id,
-            version=version,
-            source_url=source_url,
-            archive_path=archive_path or input_path,
-            unpacked_path=unpacked_path or input_path.parent,
+            input_path=input_path,
+            archive_path=archive_path,
+            unpacked_path=unpacked_path,
             checksum_sha256=checksum_sha256,
         )
-        source_file_id = upsert_source_file(
-            conn,
-            source_registry_id=source_registry_id,
-            local_path=input_path,
-            checksum_sha256=checksum_sha256,
-            snapshot_state="pending",
-            source_version=version,
-            source_url=source_url,
-        )
-
         conn.execute(
             """
             create temporary table tmp_tatoeba_stage (
@@ -67,13 +57,6 @@ def stage_tatoeba_rows(
             ) on commit drop
             """
         )
-
-        sentence_ids = {
-            entry.sentence_id
-            for entry in iter_tatoeba_entries(input_path)
-            if entry.sentence_id is not None
-        }
-        translations_by_sentence_id = load_tatoeba_translations(input_path, sentence_ids)
 
         with conn.cursor() as cursor:
             with cursor.copy(
@@ -89,11 +72,13 @@ def stage_tatoeba_rows(
                 from stdin
                 """
             ) as copy:
-                for index, entry in enumerate(iter_tatoeba_entries(input_path), start=1):
-                    translation_entry = translations_by_sentence_id.get(entry.sentence_id or "", {})
+                for index, entry in enumerate(entries, start=1):
+                    translation_entry = translations_by_sentence_id.get(
+                        entry.sentence_id or "", {}
+                    )
                     text_zh = entry.text_zh or translation_entry.get("zh")
                     text_en = entry.text_en or translation_entry.get("en")
-                    payload = {
+                    payload: dict[str, object] = {
                         "source_external_id": entry.external_id,
                         "text_fi": entry.text_fi,
                         "quality": entry.quality_score,
@@ -111,7 +96,6 @@ def stage_tatoeba_rows(
                     if entry.updated_at:
                         payload["updated_at"] = entry.updated_at
 
-                    claim_type = "example"
                     subject_key = entry.sense_key or entry.external_id
                     claim_payload = {
                         "text_en": text_en,
@@ -122,7 +106,7 @@ def stage_tatoeba_rows(
                         (
                             f"tatoeba:{index}",
                             json.dumps(payload, ensure_ascii=False),
-                            claim_type,
+                            "example",
                             subject_key,
                             entry.text_fi,
                             json.dumps(claim_payload, ensure_ascii=False),

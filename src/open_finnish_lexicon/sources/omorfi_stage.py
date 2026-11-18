@@ -161,9 +161,10 @@ def stage_omorfi_rows(
                         )
                     )
 
-            if not cursor.execute(
+            exists_row = cursor.execute(
                 "select exists (select 1 from tmp_omorfi_stage)"
-            ).fetchone()[0]:
+            ).fetchone()
+            if not (exists_row and exists_row[0]):
                 raise ValueError("Omorfi input contains no rows; refusing to replace existing analyses")
 
             clear_source_file_documents(conn, source_file_id=source_file_id)

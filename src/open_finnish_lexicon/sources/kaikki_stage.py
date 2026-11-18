@@ -1,15 +1,21 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
 from open_finnish_lexicon.db import connect
 from open_finnish_lexicon.normalize.lexemes import normalize_part_of_speech
-from open_finnish_lexicon.sources.kaikki_loader import has_kaikki_projection_data, read_kaikki_entries
+from open_finnish_lexicon.sources.kaikki_loader import (
+    has_kaikki_projection_data,
+    read_kaikki_entries,
+)
 from open_finnish_lexicon.sources.warehouse import (
     clear_source_file_documents,
-    upsert_source_file,
-    upsert_source_registry,
-    upsert_source_release,
+    prepare_pending_source_snapshot,
 )
+
+MIN_KAIKKI_REPLACEMENT_RATIO = 0.25
+LARGE_KAIKKI_SNAPSHOT_THRESHOLD = 1_000
 
 
 def stage_kaikki_entries(
@@ -23,52 +29,27 @@ def stage_kaikki_entries(
     reject_empty_snapshot: bool = False,
 ) -> int:
     with connect() as conn:
-        source_registry_id = upsert_source_registry(
+        source_file_id = prepare_pending_source_snapshot(
             conn,
             name="kaikki",
             source_kind="jsonl",
             version=version,
             source_url=source_url,
-            defer_activation=True,
-        )
-        upsert_source_release(
-            conn,
-            source_registry_id=source_registry_id,
-            version=version,
-            source_url=source_url,
-            archive_path=archive_path or input_path,
-            unpacked_path=unpacked_path or input_path.parent,
+            input_path=input_path,
+            archive_path=archive_path,
+            unpacked_path=unpacked_path,
             checksum_sha256=checksum_sha256,
-        )
-        source_file_id = upsert_source_file(
-            conn,
-            source_registry_id=source_registry_id,
-            local_path=input_path,
-            checksum_sha256=checksum_sha256,
-            snapshot_state="pending",
-            source_version=version,
-            source_url=source_url,
         )
 
         conn.execute(
             """
             create temporary table tmp_kaikki_document (
-                entry_order bigint not null,
+                entry_order bigint primary key,
                 external_id text not null,
+                word text not null,
+                part_of_speech text not null,
                 payload jsonb not null,
                 has_projection boolean not null
-            ) on commit drop
-            """
-        )
-        conn.execute(
-            """
-            create temporary table tmp_kaikki_claim (
-                entry_order bigint not null,
-                external_id text not null,
-                claim_type text not null,
-                subject_key text not null,
-                object_key text,
-                claim_payload jsonb not null
             ) on commit drop
             """
         )
@@ -76,68 +57,62 @@ def stage_kaikki_entries(
         with conn.cursor() as cursor:
             with cursor.copy(
                 """
-                copy tmp_kaikki_document (entry_order, external_id, payload, has_projection)
+                copy tmp_kaikki_document (
+                    entry_order, external_id, word, part_of_speech, payload, has_projection
+                )
                 from stdin
                 """
             ) as copy:
-                for entry_order, entry in enumerate(read_kaikki_entries(
-                    input_path, include_non_projection_entries=True
-                ), start=1):
+                for entry_order, entry in enumerate(
+                    read_kaikki_entries(
+                        input_path,
+                        include_non_projection_entries=True,
+                        reject_corrupt_stream=reject_empty_snapshot,
+                    ),
+                    start=1,
+                ):
                     part_of_speech = normalize_part_of_speech(entry["pos"])
                     external_id = f"kaikki:{entry['word']}:{part_of_speech}"
                     copy.write_row(
                         (
                             entry_order,
                             external_id,
+                            entry["word"],
+                            part_of_speech,
                             json.dumps(entry, ensure_ascii=False),
                             has_kaikki_projection_data(entry),
                         )
                     )
 
-            with cursor.copy(
-                """
-                copy tmp_kaikki_claim (
-                    entry_order,
-                    external_id,
-                    claim_type,
-                    subject_key,
-                    object_key,
-                    claim_payload
-                )
-                from stdin
-                """
-            ) as copy:
-                for entry_order, entry in enumerate(read_kaikki_entries(
-                    input_path, include_non_projection_entries=True
-                ), start=1):
-                    part_of_speech = normalize_part_of_speech(entry["pos"])
-                    external_id = f"kaikki:{entry['word']}:{part_of_speech}"
-                    copy.write_row(
-                        (
-                            entry_order,
-                            external_id,
-                            "lemma",
-                            entry["word"],
-                            None,
-                            json.dumps({"part_of_speech": part_of_speech}, ensure_ascii=False),
-                        )
+            if reject_empty_snapshot:
+                projected_row = cursor.execute(
+                    "select count(*) from tmp_kaikki_document where has_projection"
+                ).fetchone()
+                projected_count = int(projected_row[0] or 0) if projected_row else 0
+                if projected_count == 0:
+                    raise RuntimeError(
+                        "refusing to replace Kaikki source with an empty projected snapshot"
                     )
-                    for sense in entry.get("senses", []):
-                        copy.write_row(
-                            (
-                                entry_order,
-                                external_id,
-                                "sense",
-                                external_id,
-                                sense["id"],
-                                json.dumps({"glosses": sense.get("glosses", [])}, ensure_ascii=False),
-                            )
-                        )
-
-            if reject_empty_snapshot and not cursor.execute(
-                "select exists (select 1 from tmp_kaikki_document where has_projection)"
-            ).fetchone()[0]:
-                raise RuntimeError("refusing to replace Kaikki source with an empty projected snapshot")
+                existing_row = cursor.execute(
+                    """
+                    select count(*)
+                    from warehouse.source_document d
+                    join warehouse.source_file sf on sf.id = d.source_file_id
+                    join warehouse.source_registry sr on sr.id = sf.source_registry_id
+                    where sr.name = 'kaikki'
+                      and sf.snapshot_state = 'active'
+                      and d.projection_eligible
+                    """
+                ).fetchone()
+                existing_count = int(existing_row[0] or 0) if existing_row else 0
+                if (
+                    existing_count >= LARGE_KAIKKI_SNAPSHOT_THRESHOLD
+                    and projected_count < existing_count * MIN_KAIKKI_REPLACEMENT_RATIO
+                ):
+                    raise RuntimeError(
+                        f"refusing truncated Kaikki snapshot: {projected_count} projected entries "
+                        f"vs {existing_count} active entries"
+                    )
 
             clear_source_file_documents(conn, source_file_id=source_file_id)
 
@@ -183,28 +158,50 @@ def stage_kaikki_entries(
                 with document_keys as (
                     select
                         entry_order,
-                        external_id as base_external_id,
+                        word,
+                        part_of_speech,
+                        payload,
                         case
                             when count(*) over (partition by external_id) = 1 then external_id
                             else external_id || ':entry-' || entry_order::text
                         end as document_external_id
                     from tmp_kaikki_document
+                ),
+                resolved_docs as (
+                    select
+                        d.id as source_document_id,
+                        keys.entry_order,
+                        keys.document_external_id,
+                        keys.word,
+                        keys.part_of_speech,
+                        keys.payload
+                    from document_keys keys
+                    join warehouse.source_document d
+                      on d.source_file_id = %s
+                     and d.external_id = keys.document_external_id
                 )
                 select
-                    d.id,
-                    t.claim_type,
-                    case
-                        when t.claim_type = 'sense' then keys.document_external_id
-                        else t.subject_key
-                    end,
-                    t.object_key,
-                    t.claim_payload
-                from tmp_kaikki_claim t
-                join document_keys keys on keys.entry_order = t.entry_order
-                join warehouse.source_document d
-                  on d.source_file_id = %s
-                 and d.external_id = keys.document_external_id
-                where t.external_id = keys.base_external_id
+                    rd.source_document_id,
+                    'lemma',
+                    rd.word,
+                    null,
+                    jsonb_build_object('part_of_speech', rd.part_of_speech)
+                from resolved_docs rd
+                union all
+                select
+                    rd.source_document_id,
+                    'sense',
+                    rd.document_external_id,
+                    sense.item->>'id',
+                    jsonb_build_object(
+                        'glosses',
+                        coalesce(sense.item->'glosses', '[]'::jsonb)
+                    )
+                from resolved_docs rd
+                cross join lateral jsonb_array_elements(
+                    coalesce(rd.payload->'senses', '[]'::jsonb)
+                ) sense(item)
+                where btrim(coalesce(sense.item->>'id', '')) <> ''
                 """,
                 (source_file_id,),
             )

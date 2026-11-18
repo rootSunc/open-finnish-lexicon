@@ -57,15 +57,21 @@ def sanitize_invalid_zh_glosses(*, apply: bool = False) -> ZhGlossSanitizeStats:
             for sense_id, gloss_zh in selected_rows
             if simplified_chinese_text_issue(gloss_zh) is not None
         ]
-        stats = dict(
-            invalid_materialized=len(invalid_materialized),
-            invalid_selected=len(invalid_selected),
-            materialized_by_issue=dict(Counter(_issue_category(g) for _, g in invalid_materialized)),
-            selected_by_issue=dict(Counter(_issue_category(g) for _, g in invalid_selected)),
+        materialized_by_issue = dict(
+            Counter(_issue_category(g) for _, g in invalid_materialized)
+        )
+        selected_by_issue = dict(
+            Counter(_issue_category(g) for _, g in invalid_selected)
         )
         if not apply:
             conn.rollback()
-            return ZhGlossSanitizeStats(**stats)
+            return ZhGlossSanitizeStats(
+                invalid_materialized=len(invalid_materialized),
+                invalid_selected=len(invalid_selected),
+                materialized_by_issue=materialized_by_issue,
+                selected_by_issue=selected_by_issue,
+                applied=False,
+            )
 
         if invalid_materialized:
             conn.execute(
@@ -78,7 +84,13 @@ def sanitize_invalid_zh_glosses(*, apply: bool = False) -> ZhGlossSanitizeStats:
                 ([sense_id for sense_id, _ in invalid_selected],),
             )
         conn.commit()
-    return ZhGlossSanitizeStats(**stats, applied=True)
+    return ZhGlossSanitizeStats(
+        invalid_materialized=len(invalid_materialized),
+        invalid_selected=len(invalid_selected),
+        materialized_by_issue=materialized_by_issue,
+        selected_by_issue=selected_by_issue,
+        applied=True,
+    )
 
 
 def render_zh_gloss_sanitize_stats(stats: ZhGlossSanitizeStats) -> str:

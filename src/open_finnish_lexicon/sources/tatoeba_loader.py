@@ -1,7 +1,11 @@
-import re
-from collections.abc import Iterable
+from __future__ import annotations
+
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+import re
+
+import psycopg
 
 from open_finnish_lexicon.db import connection_scope
 from open_finnish_lexicon.sources.lexeme_lookup import (
@@ -11,9 +15,9 @@ from open_finnish_lexicon.sources.lexeme_lookup import (
     load_unique_form_matches,
     load_unique_lemma_matches,
 )
-from open_finnish_lexicon.zh_script import is_usable_simplified_chinese
+from open_finnish_lexicon.zh_script import normalize_and_validate_zh_sentence
 
-TOKEN_RE = re.compile(r"[^\W\d_]+(?:[-'][^\W\d_]+)*", re.UNICODE)
+TOKEN_RE = re.compile(r"[^\W\d_]+(?:[-'’ʼ‐‑‒–—][^\W\d_]+)*", re.UNICODE)
 CHINESE_LANGUAGE_PRIORITY = {
     "cmn": 0,
     "zh": 1,
@@ -60,12 +64,18 @@ ENGLISH_IRREGULAR_STEMS = {
 
 
 def _clean_direct_chinese_translation(value: object) -> str | None:
-    """Keep a direct Tatoeba translation only when it is learner-safe Chinese."""
+    """Convert Traditional->Simplified and keep learner-safe Mandarin sentences."""
 
-    if not isinstance(value, str):
+    return normalize_and_validate_zh_sentence(value)
+
+
+def _format_tatoeba_attribution(username: str | None) -> str | None:
+    if not username:
         return None
-    text = value.strip()
-    return text if text and is_usable_simplified_chinese(text) else None
+    cleaned = username.strip()
+    if not cleaned or cleaned == r"\N":
+        return None
+    return f"Tatoeba ({cleaned})"
 
 
 @dataclass(frozen=True)
@@ -104,7 +114,7 @@ def get_tatoeba_source_kind(input_path: Path) -> str:
     raise ValueError("unsupported Tatoeba format")
 
 
-def iter_tatoeba_entries(input_path: Path) -> Iterable[TatoebaEntry]:
+def iter_tatoeba_entries(input_path: Path) -> Iterator[TatoebaEntry]:
     source_kind = get_tatoeba_source_kind(input_path)
     with input_path.open(encoding="utf-8") as handle:
         for line in handle:
@@ -142,39 +152,56 @@ def iter_tatoeba_entries(input_path: Path) -> Iterable[TatoebaEntry]:
             )
 
 
-def discover_tatoeba_companion_paths(input_path: Path) -> tuple[Path | None, Path | None]:
+def discover_tatoeba_companion_paths(input_path: Path) -> tuple[Path | None, list[Path]]:
     search_dirs = [input_path.parent, input_path.parent.parent]
-    links_path = None
-    sentences_path = None
+    links_path: Path | None = None
+    sentence_paths: list[Path] = []
+    seen_sentence_names: set[str] = set()
     for directory in search_dirs:
         candidate = directory / "links.csv"
         if links_path is None and candidate.exists():
             links_path = candidate
-        candidate = directory / "sentences.csv"
-        if sentences_path is None and candidate.exists():
-            sentences_path = candidate
-    return links_path, sentences_path
+        for filename in (
+            "eng_sentences_detailed.tsv",
+            "cmn_sentences_detailed.tsv",
+            "sentences.csv",
+        ):
+            sent_candidate = directory / filename
+            if filename not in seen_sentence_names and sent_candidate.exists():
+                seen_sentence_names.add(filename)
+                sentence_paths.append(sent_candidate)
+    return links_path, sentence_paths
 
 
 def load_tatoeba_translations(input_path: Path, sentence_ids: set[str]) -> dict[str, dict[str, str]]:
     if not sentence_ids:
         return {}
 
-    links_path, sentences_path = discover_tatoeba_companion_paths(input_path)
-    if links_path is None or sentences_path is None:
+    links_path, sentence_paths = discover_tatoeba_companion_paths(input_path)
+    if links_path is None or not sentence_paths:
         return {}
 
     direct_ids_by_sentence: dict[str, list[str]] = {}
+    direct_sets_by_sentence: dict[str, set[str]] = {}
     with links_path.open(encoding="utf-8") as handle:
         for line in handle:
             stripped = line.rstrip("\n")
             if not stripped:
                 continue
-            left_id, right_id = stripped.split("\t", 1)
+            parts = stripped.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            left_id, right_id = parts
             if left_id in sentence_ids:
-                direct_ids_by_sentence.setdefault(left_id, []).append(right_id)
+                direct_set = direct_sets_by_sentence.setdefault(left_id, set())
+                if right_id not in direct_set:
+                    direct_set.add(right_id)
+                    direct_ids_by_sentence.setdefault(left_id, []).append(right_id)
             if right_id in sentence_ids:
-                direct_ids_by_sentence.setdefault(right_id, []).append(left_id)
+                direct_set = direct_sets_by_sentence.setdefault(right_id, set())
+                if left_id not in direct_set:
+                    direct_set.add(left_id)
+                    direct_ids_by_sentence.setdefault(right_id, []).append(left_id)
 
     first_hop_to_sentence_ids: dict[str, list[str]] = {}
     for sentence_id, direct_ids in direct_ids_by_sentence.items():
@@ -182,22 +209,38 @@ def load_tatoeba_translations(input_path: Path, sentence_ids: set[str]) -> dict[
             first_hop_to_sentence_ids.setdefault(linked_id, []).append(sentence_id)
     first_hop_ids = set(first_hop_to_sentence_ids)
     second_hop_ids_by_sentence: dict[str, list[str]] = {}
+    second_hop_sets_by_sentence: dict[str, set[str]] = {}
     if first_hop_ids:
         with links_path.open(encoding="utf-8") as handle:
             for line in handle:
                 stripped = line.rstrip("\n")
                 if not stripped:
                     continue
-                left_id, right_id = stripped.split("\t", 1)
+                parts = stripped.split("\t", 1)
+                if len(parts) != 2:
+                    continue
+                left_id, right_id = parts
                 if left_id in first_hop_ids:
                     for sentence_id in first_hop_to_sentence_ids[left_id]:
-                        direct_ids = direct_ids_by_sentence.get(sentence_id, [])
-                        if right_id != sentence_id and right_id not in direct_ids:
+                        direct_set = direct_sets_by_sentence.get(sentence_id, set())
+                        second_set = second_hop_sets_by_sentence.setdefault(sentence_id, set())
+                        if (
+                            right_id != sentence_id
+                            and right_id not in direct_set
+                            and right_id not in second_set
+                        ):
+                            second_set.add(right_id)
                             second_hop_ids_by_sentence.setdefault(sentence_id, []).append(right_id)
                 if right_id in first_hop_ids:
                     for sentence_id in first_hop_to_sentence_ids[right_id]:
-                        direct_ids = direct_ids_by_sentence.get(sentence_id, [])
-                        if left_id != sentence_id and left_id not in direct_ids:
+                        direct_set = direct_sets_by_sentence.get(sentence_id, set())
+                        second_set = second_hop_sets_by_sentence.setdefault(sentence_id, set())
+                        if (
+                            left_id != sentence_id
+                            and left_id not in direct_set
+                            and left_id not in second_set
+                        ):
+                            second_set.add(left_id)
                             second_hop_ids_by_sentence.setdefault(sentence_id, []).append(left_id)
 
     linked_ids_by_sentence = {
@@ -211,29 +254,33 @@ def load_tatoeba_translations(input_path: Path, sentence_ids: set[str]) -> dict[
     }
 
     translated_sentences: dict[str, dict[str, tuple[int, str]]] = {}
-    with sentences_path.open(encoding="utf-8") as handle:
-        for line in handle:
-            stripped = line.rstrip("\n")
-            if not stripped:
-                continue
-            sentence_id, language_code, text = stripped.split("\t", 2)
-            if sentence_id not in target_ids:
-                continue
-            translation_kind = None
-            priority = CHINESE_LANGUAGE_PRIORITY.get(language_code)
-            if priority is not None:
-                translation_kind = "zh"
-            else:
-                priority = ENGLISH_LANGUAGE_PRIORITY.get(language_code)
+    for sentences_path in sentence_paths:
+        with sentences_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                stripped = line.rstrip("\n")
+                if not stripped:
+                    continue
+                parts = stripped.split("\t", 3)
+                if len(parts) < 3:
+                    continue
+                sentence_id, language_code, text = parts[:3]
+                if sentence_id not in target_ids:
+                    continue
+                translation_kind: str | None = None
+                priority: int | None = CHINESE_LANGUAGE_PRIORITY.get(language_code)
                 if priority is not None:
-                    translation_kind = "en"
-            if translation_kind is None:
-                continue
+                    translation_kind = "zh"
+                else:
+                    priority = ENGLISH_LANGUAGE_PRIORITY.get(language_code)
+                    if priority is not None:
+                        translation_kind = "en"
+                if translation_kind is None or priority is None:
+                    continue
 
-            sentence_translations = translated_sentences.setdefault(sentence_id, {})
-            current = sentence_translations.get(translation_kind)
-            if current is None or priority < current[0]:
-                sentence_translations[translation_kind] = (priority, text)
+                sentence_translations = translated_sentences.setdefault(sentence_id, {})
+                current = sentence_translations.get(translation_kind)
+                if current is None or priority < current[0]:
+                    sentence_translations[translation_kind] = (priority, text)
 
     translations: dict[str, dict[str, str]] = {}
     for sentence_id, linked_ids in linked_ids_by_sentence.items():
@@ -314,7 +361,7 @@ def _resolve_sense_id_from_english(
     return best_sense_id
 
 
-def _delete_existing_tatoeba_rows(conn) -> None:
+def _delete_existing_tatoeba_rows(conn: psycopg.Connection) -> None:
     conn.execute(
         """
         delete from lexicon.sense_example
@@ -338,21 +385,7 @@ def _delete_existing_tatoeba_rows(conn) -> None:
     conn.execute("delete from lexicon.example where source_label = 'tatoeba'")
 
 
-def _resolve_legacy_sense_id(conn, entry: TatoebaEntry) -> int | None:
-    """Resolve a legacy sense key without silently choosing a homonym.
-
-    The legacy TSV predates the current ``(lexeme_id, sense_key)`` uniqueness
-    constraint, so a key can occur on more than one lexeme.  Prefer an exact
-    Finnish sentence already attached to one sense; otherwise use the English
-    sentence to disambiguate and drop the row when the evidence is still
-    ambiguous.
-    """
-
-    # Legacy exports commonly used generic keys such as ``sense-1``.  The
-    # Finnish sentence is a stronger signal than that key when the dictionary
-    # already contains the same example (for example, a Kaikki example with a
-    # missing English gloss).  Only accept this shortcut when the sentence is
-    # attached to exactly one sense, so shared examples remain conservative.
+def _resolve_legacy_sense_id(conn: psycopg.Connection, entry: TatoebaEntry) -> int | None:
     exact_sentence_senses = conn.execute(
         """
         select distinct se.sense_id
@@ -378,14 +411,11 @@ def _resolve_legacy_sense_id(conn, entry: TatoebaEntry) -> int | None:
     if not candidates:
         return None
     resolved = _resolve_sense_id_from_english(
-        [(int(sense_id), gloss_en) for sense_id, gloss_en in candidates],
+        [(int(sense_id), str(gloss_en)) for sense_id, gloss_en in candidates],
         entry.text_en,
     )
     if resolved is not None:
         return resolved
-    # Only fall back to a unique key when there is no English to score.
-    # A lone leftover test sense (for example a form-of probe sharing
-    # ``sense-1``) must not swallow fixture sentences such as "He runs quickly."
     if len(candidates) == 1 and not _english_content_stems(entry.text_en):
         return int(candidates[0][0])
     return None
@@ -395,7 +425,7 @@ def _ingest_legacy_tatoeba(
     input_path: Path,
     *,
     entries: Iterable[TatoebaEntry] | None = None,
-    connection=None,
+    connection: psycopg.Connection | None = None,
 ) -> None:
     owns_connection = connection is None
     with connection_scope(connection) as conn:
@@ -406,14 +436,24 @@ def _ingest_legacy_tatoeba(
             sense_id = _resolve_legacy_sense_id(conn, entry)
             if sense_id is None:
                 continue
-            example_id = conn.execute(
+            row = conn.execute(
                 """
-                insert into lexicon.example (text_fi, text_en, source_label, quality_score)
-                values (%s, %s, %s, %s)
+                insert into lexicon.example (
+                    text_fi, text_en, source_label, quality_score, attribution
+                )
+                values (%s, %s, %s, %s, %s)
                 returning id
                 """,
-                (entry.text_fi, entry.text_en, "tatoeba", entry.quality_score),
-            ).fetchone()[0]
+                (
+                    entry.text_fi,
+                    entry.text_en,
+                    "tatoeba",
+                    entry.quality_score,
+                    _format_tatoeba_attribution(entry.username),
+                ),
+            ).fetchone()
+            assert row is not None
+            example_id = int(row[0])
             text_zh = _clean_direct_chinese_translation(entry.text_zh)
             if text_zh:
                 conn.execute(
@@ -423,9 +463,10 @@ def _ingest_legacy_tatoeba(
                         text_zh,
                         generation_method,
                         generation_version,
-                        is_primary
+                        is_primary,
+                        is_usable
                     )
-                    values (%s, %s, %s, %s, %s)
+                    values (%s, %s, %s, %s, %s, true)
                     """,
                     (example_id, text_zh, "tatoeba-direct-zh", "v1", True),
                 )
@@ -444,7 +485,7 @@ def _ingest_legacy_tatoeba(
 
 
 def _upsert_tatoeba_chunk_with_cache(
-    conn,
+    conn: psycopg.Connection,
     entries: list[TatoebaEntry],
     cache: TatoebaLookupCache,
     translations_by_sentence_id: dict[str, dict[str, str]],
@@ -495,7 +536,7 @@ def _upsert_tatoeba_chunk_with_cache(
     for lexeme_id in unresolved_sense_candidates:
         cache.sense_candidates[lexeme_id] = resolved_sense_candidates.get(lexeme_id, [])
 
-    example_rows: dict[str, tuple[str | None, float, str | None]] = {}
+    example_rows: dict[str, tuple[str | None, float, str | None, str | None]] = {}
     link_rows: list[tuple[str, int, int]] = []
     for entry in entries:
         if entry.quality_score < TATOEBA_MIN_EXAMPLE_QUALITY:
@@ -506,12 +547,14 @@ def _upsert_tatoeba_chunk_with_cache(
             entry.text_zh or translation_entry.get("zh")
         )
         text_en = entry.text_en or translation_entry.get("en")
+        attribution = _format_tatoeba_attribution(entry.username)
         if existing is None or entry.quality_score > existing[1]:
-            example_rows[entry.text_fi] = (text_en, entry.quality_score, text_zh)
-        elif existing[2] is None and text_zh is not None:
-            example_rows[entry.text_fi] = (existing[0] or text_en, existing[1], text_zh)
-        elif existing[0] is None and text_en is not None:
-            example_rows[entry.text_fi] = (text_en, existing[1], existing[2])
+            example_rows[entry.text_fi] = (text_en, entry.quality_score, text_zh, attribution)
+        else:
+            merged_en = existing[0] or text_en
+            merged_zh = existing[2] or text_zh
+            merged_attr = existing[3] or attribution
+            example_rows[entry.text_fi] = (merged_en, existing[1], merged_zh, merged_attr)
 
         seen_sense_ids: set[int] = set()
         sort_order = 1
@@ -521,7 +564,7 @@ def _upsert_tatoeba_chunk_with_cache(
                 lexeme_id = cache.lemma_matches.get(token)
             if lexeme_id is None:
                 lexeme_id = cache.form_matches.get(token)
-            sense_id = cache.single_sense_ids.get(lexeme_id)
+            sense_id = cache.single_sense_ids.get(lexeme_id) if lexeme_id is not None else None
             if sense_id is None and lexeme_id is not None:
                 sense_id = _resolve_sense_id_from_english(
                     cache.sense_candidates.get(lexeme_id, []),
@@ -540,7 +583,8 @@ def _upsert_tatoeba_chunk_with_cache(
                 text_fi text primary key,
                 text_en text,
                 quality_score numeric(6, 5) not null,
-                text_zh text
+                text_zh text,
+                attribution text
             ) on commit drop
             """
         )
@@ -560,7 +604,8 @@ def _upsert_tatoeba_chunk_with_cache(
                 text_fi text not null,
                 text_en text,
                 quality_score numeric(6, 5) not null,
-                text_zh text
+                text_zh text,
+                attribution text
             ) on commit drop
             """
         )
@@ -578,22 +623,23 @@ def _upsert_tatoeba_chunk_with_cache(
 
         with cursor.copy(
             """
-            copy tmp_tatoeba_example_chunk (text_fi, text_en, quality_score, text_zh)
+            copy tmp_tatoeba_example_chunk (text_fi, text_en, quality_score, text_zh, attribution)
             from stdin
             """
         ) as copy:
-            for text_fi, (text_en, quality_score, text_zh) in example_rows.items():
-                copy.write_row((text_fi, text_en, quality_score, text_zh))
+            for text_fi, (text_en, quality_score, text_zh, attribution) in example_rows.items():
+                copy.write_row((text_fi, text_en, quality_score, text_zh, attribution))
 
         cursor.execute(
             """
-            insert into tmp_tatoeba_example (text_fi, text_en, quality_score, text_zh)
-            select text_fi, text_en, quality_score, text_zh
+            insert into tmp_tatoeba_example (text_fi, text_en, quality_score, text_zh, attribution)
+            select text_fi, text_en, quality_score, text_zh, attribution
             from tmp_tatoeba_example_chunk
             on conflict (text_fi) do update
             set text_en = coalesce(excluded.text_en, tmp_tatoeba_example.text_en),
                 quality_score = greatest(tmp_tatoeba_example.quality_score, excluded.quality_score),
-                text_zh = coalesce(tmp_tatoeba_example.text_zh, excluded.text_zh)
+                text_zh = coalesce(excluded.text_zh, tmp_tatoeba_example.text_zh),
+                attribution = coalesce(excluded.attribution, tmp_tatoeba_example.attribution)
             """
         )
 
@@ -623,7 +669,7 @@ def _ingest_real_tatoeba(
     *,
     entries: list[TatoebaEntry] | None = None,
     translations_by_sentence_id: dict[str, dict[str, str]] | None = None,
-    connection=None,
+    connection: psycopg.Connection | None = None,
 ) -> None:
     source_entries = list(iter_tatoeba_entries(input_path)) if entries is None else entries
     chunk: list[TatoebaEntry] = []
@@ -644,18 +690,26 @@ def _ingest_real_tatoeba(
     owns_connection = connection is None
     with connection_scope(connection) as conn:
         _delete_existing_tatoeba_rows(conn)
+        conn.execute("drop table if exists tmp_tatoeba_example")
+        conn.execute("drop table if exists tmp_tatoeba_link")
         for entry in source_entries:
             chunk.append(entry)
             if len(chunk) >= 5_000:
-                _upsert_tatoeba_chunk_with_cache(conn, chunk, lookup_cache, translations_by_sentence_id)
+                _upsert_tatoeba_chunk_with_cache(
+                    conn, chunk, lookup_cache, translations_by_sentence_id
+                )
                 chunk.clear()
         if chunk:
-            _upsert_tatoeba_chunk_with_cache(conn, chunk, lookup_cache, translations_by_sentence_id)
+            _upsert_tatoeba_chunk_with_cache(
+                conn, chunk, lookup_cache, translations_by_sentence_id
+            )
 
         conn.execute(
             """
-            insert into lexicon.example (text_fi, text_en, source_label, quality_score)
-            select text_fi, text_en, 'tatoeba', quality_score
+            insert into lexicon.example (
+                text_fi, text_en, source_label, quality_score, attribution
+            )
+            select text_fi, text_en, 'tatoeba', quality_score, attribution
             from tmp_tatoeba_example
             where exists (
                 select 1
@@ -684,9 +738,10 @@ def _ingest_real_tatoeba(
                 text_zh,
                 generation_method,
                 generation_version,
-                is_primary
+                is_primary,
+                is_usable
             )
-            select example.id, tmp.text_zh, 'tatoeba-direct-zh', 'v1', true
+            select example.id, tmp.text_zh, 'tatoeba-direct-zh', 'v1', true, true
             from tmp_tatoeba_example tmp
             join lexicon.example example
               on example.source_label = 'tatoeba'
@@ -707,14 +762,13 @@ def ingest_tatoeba(
     input_path: Path,
     *,
     entries: Iterable[TatoebaEntry] | None = None,
-    connection=None,
+    connection: psycopg.Connection | None = None,
 ) -> None:
-    if entries is None:
-        staged_entries = list(iter_tatoeba_entries(input_path))
-    else:
-        staged_entries = list(entries)
+    staged_entries = list(iter_tatoeba_entries(input_path)) if entries is None else list(entries)
     if not staged_entries:
-        raise ValueError("Tatoeba input contains no valid Finnish entries; refusing to replace existing examples")
+        raise ValueError(
+            "Tatoeba input contains no valid Finnish entries; refusing to replace existing examples"
+        )
     if entries is None and get_tatoeba_source_kind(input_path) == "tsv":
         _ingest_legacy_tatoeba(input_path, entries=staged_entries, connection=connection)
         return

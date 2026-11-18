@@ -1,16 +1,17 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
 from open_finnish_lexicon.db import connect
 from open_finnish_lexicon.sources.finnwordnet_loader import (
     iter_finnwordnet_relations,
+    iter_finnwordnet_semantic_relations,
     iter_finnwordnet_word_senses,
 )
 from open_finnish_lexicon.sources.warehouse import (
     clear_source_file_documents,
-    upsert_source_file,
-    upsert_source_registry,
-    upsert_source_release,
+    prepare_pending_source_snapshot,
 )
 
 
@@ -25,37 +26,24 @@ def stage_finnwordnet_rows(
 ) -> int:
     word_senses = list(iter_finnwordnet_word_senses(input_path))
     relations = list(iter_finnwordnet_relations(input_path))
+    semantic_relations = list(iter_finnwordnet_semantic_relations(input_path))
     if not word_senses and not relations:
-        raise ValueError("FinnWordNet input contains no rows; refusing to replace existing relations")
+        raise ValueError(
+            "FinnWordNet input contains no rows; refusing to replace existing relations"
+        )
 
     with connect() as conn:
-        source_registry_id = upsert_source_registry(
+        source_file_id = prepare_pending_source_snapshot(
             conn,
             name="finnwordnet",
             source_kind="tsv",
             version=version,
             source_url=source_url,
-            defer_activation=True,
-        )
-        upsert_source_release(
-            conn,
-            source_registry_id=source_registry_id,
-            version=version,
-            source_url=source_url,
-            archive_path=archive_path or input_path,
-            unpacked_path=unpacked_path or input_path.parent,
+            input_path=input_path,
+            archive_path=archive_path,
+            unpacked_path=unpacked_path,
             checksum_sha256=checksum_sha256,
         )
-        source_file_id = upsert_source_file(
-            conn,
-            source_registry_id=source_registry_id,
-            local_path=input_path,
-            checksum_sha256=checksum_sha256,
-            snapshot_state="pending",
-            source_version=version,
-            source_url=source_url,
-        )
-
         clear_source_file_documents(conn, source_file_id=source_file_id)
         conn.execute(
             """
@@ -127,6 +115,25 @@ def stage_finnwordnet_rows(
                                 },
                                 ensure_ascii=False,
                             ),
+                        )
+                    )
+
+                sem_offset = offset + len(relations)
+                for index, semrel in enumerate(semantic_relations, start=1):
+                    payload = {
+                        "kind": "semrel",
+                        "source_synset_id": semrel.source_synset_id,
+                        "target_synset_id": semrel.target_synset_id,
+                        "relation_type": semrel.relation_type,
+                    }
+                    copy.write_row(
+                        (
+                            f"finnwordnet:semrel:{sem_offset + index}",
+                            json.dumps(payload, ensure_ascii=False),
+                            "synset-relation",
+                            semrel.source_synset_id,
+                            semrel.target_synset_id,
+                            json.dumps({"relation_type": semrel.relation_type}, ensure_ascii=False),
                         )
                     )
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from psycopg import sql
+
 from open_finnish_lexicon.db import connect
 from open_finnish_lexicon.zh_script import simplified_chinese_text_issue
 
@@ -24,10 +26,28 @@ TABLE_COUNTS = (
 )
 
 
+def _scalar_int(row: tuple[Any, ...] | None) -> int:
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def collect_data_quality_metrics() -> dict[str, Any]:
     with connect() as conn:
         counts = {
-            table: conn.execute(f"select count(*) from {table}").fetchone()[0]
+            table: (
+                _scalar_int(
+                    conn.execute(
+                        "select count(*) from zh_layer.zh_example_translation where is_usable"
+                    ).fetchone()
+                )
+                if table == "zh_layer.zh_example_translation"
+                else _scalar_int(
+                    conn.execute(
+                        sql.SQL("select count(*) from {}").format(
+                            sql.Identifier(*table.split("."))
+                        )
+                    ).fetchone()
+                )
+            )
             for table in TABLE_COUNTS
         }
         coverage = conn.execute(
@@ -42,7 +62,7 @@ def collect_data_quality_metrics() -> dict[str, Any]:
                   where exists (select 1 from lexicon.sense_example se where se.sense_id = s.id)),
                 (select count(distinct sense_id) from zh_layer.zh_gloss where gloss_zh is not null)
             """
-        ).fetchone()
+        ).fetchone() or (0, 0, 0, 0, 0)
         verdicts = dict(
             conn.execute(
                 "select verdict, count(*) from lexicon.form_validation group by verdict order by verdict"

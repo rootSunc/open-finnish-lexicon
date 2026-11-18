@@ -26,25 +26,24 @@ def _has_active_same_path(source_file_id: int, input_path: Path, connection=None
     """Detect a retry of a path that already has a published snapshot."""
 
     with connection_scope(connection) as conn:
-        return bool(
-            conn.execute(
-                """
-                select exists (
-                    select 1
-                    from warehouse.source_file pending
-                    join warehouse.source_file active
-                      on active.source_registry_id = pending.source_registry_id
-                     and active.local_path = pending.local_path
-                     and active.snapshot_state = 'active'
-                     and active.id <> pending.id
-                    where pending.id = %s
-                      and pending.local_path = %s
-                      and pending.snapshot_state = 'pending'
-                )
-                """,
-                (source_file_id, str(input_path)),
-            ).fetchone()[0]
-        )
+        row = conn.execute(
+            """
+            select exists (
+                select 1
+                from warehouse.source_file pending
+                join warehouse.source_file active
+                  on active.source_registry_id = pending.source_registry_id
+                 and active.local_path = pending.local_path
+                 and active.snapshot_state = 'active'
+                 and active.id <> pending.id
+                where pending.id = %s
+                  and pending.local_path = %s
+                  and pending.snapshot_state = 'pending'
+            )
+            """,
+            (source_file_id, str(input_path)),
+        ).fetchone()
+        return bool(row and row[0])
 
 
 def _iter_staged_kaikki_entries(conn, source_file_id: int):

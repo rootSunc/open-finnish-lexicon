@@ -1,53 +1,56 @@
 from open_finnish_lexicon.db import connect
 from open_finnish_lexicon.normalize.lexemes.merge import (
     _cleanup_relation_duplicates,
-    _merge_lexeme_into,
+    _merge_no_sense_lexemes_bulk,
 )
+
 
 def align_surface_forms_to_sense_lexemes() -> int:
     with connect() as conn:
-        singleton_merge_rows = conn.execute(
-            """
-            with unique_sense_targets as (
-                select
-                    lower(l.lemma) as normalized_lemma,
-                    min(l.id) as target_id
-                from lexicon.lexeme l
-                where exists (
-                    select 1
-                    from lexicon.lexeme_sense s
-                    where s.lexeme_id = l.id
+        singleton_merge_rows = [
+            (int(source_id), int(target_id))
+            for source_id, target_id in conn.execute(
+                """
+                with unique_sense_targets as (
+                    select
+                        lower(l.lemma) as normalized_lemma,
+                        min(l.id) as target_id
+                    from lexicon.lexeme l
+                    where exists (
+                        select 1
+                        from lexicon.lexeme_sense s
+                        where s.lexeme_id = l.id
+                    )
+                    group by lower(l.lemma)
+                    having count(*) = 1
+                ),
+                form_only_stats as (
+                    select
+                        l.id as source_id,
+                        min(f.normalized_form) as normalized_form,
+                        count(distinct f.normalized_form) as normalized_form_count
+                    from lexicon.lexeme l
+                    join lexicon.form f on f.lexeme_id = l.id
+                    where not exists (
+                        select 1
+                        from lexicon.lexeme_sense s
+                        where s.lexeme_id = l.id
+                    )
+                    group by l.id
                 )
-                group by lower(l.lemma)
-                having count(*) = 1
-            ),
-            form_only_stats as (
-                select
-                    l.id as source_id,
-                    min(f.normalized_form) as normalized_form,
-                    count(distinct f.normalized_form) as normalized_form_count
-                from lexicon.lexeme l
-                join lexicon.form f on f.lexeme_id = l.id
-                where not exists (
-                    select 1
-                    from lexicon.lexeme_sense s
-                    where s.lexeme_id = l.id
-                )
-                group by l.id
-            )
-            select source_id, target_id
-            from form_only_stats fs
-            join unique_sense_targets st on st.normalized_lemma = fs.normalized_form
-            where fs.normalized_form_count = 1
-              and fs.source_id <> st.target_id
-            order by source_id
-            """
-        ).fetchall()
+                select source_id, target_id
+                from form_only_stats fs
+                join unique_sense_targets st on st.normalized_lemma = fs.normalized_form
+                where fs.normalized_form_count = 1
+                  and fs.source_id <> st.target_id
+                order by source_id
+                """
+            ).fetchall()
+        ]
 
-        singleton_merge_count = 0
-        for source_id, target_id in singleton_merge_rows:
-            _merge_lexeme_into(conn, source_id, target_id)
-            singleton_merge_count += 1
+        singleton_merge_count = len(singleton_merge_rows)
+        if singleton_merge_rows:
+            _merge_no_sense_lexemes_bulk(conn, singleton_merge_rows)
 
         conn.execute(
             """
@@ -105,9 +108,8 @@ def align_surface_forms_to_sense_lexemes() -> int:
             """
         )
 
-        moved_form_count = conn.execute(
-            "select count(*) from tmp_form_row_alignment"
-        ).fetchone()[0]
+        count_row = conn.execute("select count(*) from tmp_form_row_alignment").fetchone()
+        moved_form_count = int(count_row[0]) if count_row else 0
         if moved_form_count:
             conn.execute(
                 """
@@ -187,4 +189,4 @@ def align_surface_forms_to_sense_lexemes() -> int:
 
         _cleanup_relation_duplicates(conn)
         conn.commit()
-        return singleton_merge_count + int(moved_form_count)
+        return singleton_merge_count + moved_form_count

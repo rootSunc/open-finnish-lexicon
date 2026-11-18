@@ -1,15 +1,13 @@
-"""Set-based projection of a staged Kaikki snapshot.
-
-The warehouse stage is already a compact, immutable snapshot.  Keeping the
-projector set-based means a large release does not turn into one network round
-trip per word, sense, and form.  The older iterable projector remains useful
-for direct callers and small compatibility tests; production snapshot
-projects use this module.
-"""
+"""Set-based projection of a staged Kaikki snapshot."""
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import json
+import sys
+
+import psycopg
+from psycopg import sql
 
 from open_finnish_lexicon.db import connect
 from open_finnish_lexicon.normalize.senses import _delete_orphan_kaikki_senses
@@ -20,11 +18,45 @@ from open_finnish_lexicon.sources.kaikki_loader import (
 )
 
 _FORM_CLEANUP_BATCH_SIZE = 10_000
+KAIKKI_EXAMPLE_QUALITY = 0.70
 
 
-def _prepare_staged_entries(conn, source_file_id: int) -> int:
+def refresh_lexeme_is_lemma_flags(conn: psycopg.Connection) -> None:
+    """Keep ``lexicon.lexeme.is_lemma`` false for pure ``form-of`` entries and
+    true for all canonical/sense-bearing lemmas."""
+
+    conn.execute(
+        """
+        update lexicon.lexeme l
+        set is_lemma = computed.expected_is_lemma
+        from (
+            select
+                lx.id,
+                not (
+                    exists (
+                        select 1
+                        from lexicon.lexeme_sense s
+                        where s.lexeme_id = lx.id
+                    )
+                    and not exists (
+                        select 1
+                        from lexicon.lexeme_sense s
+                        where s.lexeme_id = lx.id
+                          and not ('form-of' = any(s.labels))
+                    )
+                ) as expected_is_lemma
+            from lexicon.lexeme lx
+        ) computed
+        where l.id = computed.id
+          and l.is_lemma is distinct from computed.expected_is_lemma
+        """
+    )
+
+
+def _prepare_staged_entries(conn: psycopg.Connection, source_file_id: int) -> int:
     """Copy compact projectable payloads into a transaction-local table."""
 
+    conn.execute("drop table if exists tmp_kaikki_entry")
     conn.execute(
         """
         create temporary table tmp_kaikki_entry (
@@ -36,10 +68,6 @@ def _prepare_staged_entries(conn, source_file_id: int) -> int:
         ) on commit preserve rows
         """
     )
-    # Read through a separate connection: psycopg does not allow a second
-    # statement on the connection while COPY FROM is open.  The staged rows
-    # are committed before projection starts, so this remains a consistent
-    # read of the immutable source snapshot.
     with connect() as read_conn:
         with conn.cursor() as cursor:
             with cursor.copy(
@@ -66,7 +94,9 @@ def _prepare_staged_entries(conn, source_file_id: int) -> int:
                         break
                     for document_id, payload in rows:
                         last_document_id = int(document_id)
-                        if not isinstance(payload, dict) or not has_kaikki_projection_data(payload):
+                        if not isinstance(payload, dict) or not has_kaikki_projection_data(
+                            payload
+                        ):
                             continue
                         entry = compact_kaikki_entry(payload)
                         copy.write_row(
@@ -77,17 +107,62 @@ def _prepare_staged_entries(conn, source_file_id: int) -> int:
                                 json.dumps(entry, ensure_ascii=False),
                             )
                         )
-    return int(
-        conn.execute("select count(*) from tmp_kaikki_entry").fetchone()[0]
-    )
+    row = conn.execute("select count(*) from tmp_kaikki_entry").fetchone()
+    return int(row[0]) if row else 0
 
 
-def _prepare_staged_form_keys(conn) -> None:
-    """Materialize the incoming form keys before replacing source ownership."""
+def _prepare_iterable_entries(conn: psycopg.Connection, entries: Iterable[dict]) -> int:
+    """Copy an in-memory/streamed iterable of Kaikki entries into ``tmp_kaikki_entry``."""
 
+    conn.execute("drop table if exists tmp_kaikki_entry")
     conn.execute(
         """
-        create temporary table if not exists tmp_kaikki_form_key (
+        create temporary table tmp_kaikki_entry (
+            source_document_id bigint primary key,
+            lemma text not null,
+            part_of_speech text not null,
+            payload jsonb not null,
+            lexeme_id bigint
+        ) on commit preserve rows
+        """
+    )
+    with conn.cursor() as cursor:
+        with cursor.copy(
+            """
+            copy tmp_kaikki_entry (
+                source_document_id, lemma, part_of_speech, payload
+            ) from stdin
+            """
+        ) as copy:
+            synthetic_id = 0
+            for raw in entries:
+                if not isinstance(raw, dict):
+                    continue
+                if not raw.get("word") or not raw.get("pos"):
+                    continue
+                if not has_kaikki_projection_data(raw):
+                    continue
+                synthetic_id += 1
+                entry = compact_kaikki_entry(raw)
+                copy.write_row(
+                    (
+                        synthetic_id,
+                        entry["word"],
+                        entry["pos"],
+                        json.dumps(entry, ensure_ascii=False),
+                    )
+                )
+    row = conn.execute("select count(*) from tmp_kaikki_entry").fetchone()
+    return int(row[0]) if row else 0
+
+
+def _prepare_staged_form_keys(conn: psycopg.Connection) -> None:
+    """Materialize the incoming form keys before replacing source ownership."""
+
+    conn.execute("drop table if exists tmp_kaikki_form_key")
+    conn.execute(
+        """
+        create temporary table tmp_kaikki_form_key (
             lexeme_id bigint not null,
             surface_form text not null,
             normalized_form text not null,
@@ -114,13 +189,11 @@ def _prepare_staged_form_keys(conn) -> None:
         on conflict do nothing
         """
     )
-    # Temporary relations have no planner statistics by default.  Without
-    # stats, the snapshot replacement anti-join can be planned as a tiny
-    # nested-loop input even though it contains tens of millions of keys.
     conn.execute("analyze tmp_kaikki_form_key")
+    conn.execute("drop table if exists tmp_kaikki_form_snapshot_key")
     conn.execute(
         """
-        create temporary table if not exists tmp_kaikki_form_snapshot_key (
+        create temporary table tmp_kaikki_form_snapshot_key (
             lemma text not null,
             part_of_speech text not null,
             normalized_form text not null,
@@ -143,21 +216,26 @@ def _prepare_staged_form_keys(conn) -> None:
     conn.execute("analyze tmp_kaikki_form_snapshot_key")
 
 
-def _clear_owned_forms_and_senses(conn, source_file_id: int, replace_snapshot: bool) -> None:
+def _clear_owned_forms_and_senses(
+    conn: psycopg.Connection, source_file_id: int, replace_snapshot: bool
+) -> None:
     """Clear source ownership while retaining rows shared by another source."""
 
     source_ids_sql = (
-        """
-        select sf.id
-        from warehouse.source_file sf
-        join warehouse.source_registry sr on sr.id = sf.source_registry_id
-        where sr.name = 'kaikki'
-        """
+        sql.SQL(
+            """
+            select sf.id
+            from warehouse.source_file sf
+            join warehouse.source_registry sr on sr.id = sf.source_registry_id
+            where sr.name = 'kaikki'
+            """
+        )
         if replace_snapshot
-        else "select %s"
+        else sql.SQL("select %s")
     )
     params: tuple[object, ...] = () if replace_snapshot else (source_file_id,)
 
+    conn.execute("drop table if exists tmp_kaikki_sense_cleanup")
     conn.execute(
         """
         create temporary table tmp_kaikki_sense_cleanup (
@@ -166,23 +244,28 @@ def _clear_owned_forms_and_senses(conn, source_file_id: int, replace_snapshot: b
         """
     )
     conn.execute(
-        f"""
-        insert into tmp_kaikki_sense_cleanup (sense_id)
-        select distinct sense_id
-        from lexicon.sense_source
-        where source_file_id in ({source_ids_sql})
-        on conflict do nothing
-        """,
+        sql.SQL(
+            """
+            insert into tmp_kaikki_sense_cleanup (sense_id)
+            select distinct sense_id
+            from lexicon.sense_source
+            where source_file_id in ({source_ids_sql})
+            on conflict do nothing
+            """
+        ).format(source_ids_sql=source_ids_sql),
         params,
     )
     conn.execute(
-        f"""
-        delete from lexicon.sense_source
-        where source_file_id in ({source_ids_sql})
-        """,
+        sql.SQL(
+            """
+            delete from lexicon.sense_source
+            where source_file_id in ({source_ids_sql})
+            """
+        ).format(source_ids_sql=source_ids_sql),
         params,
     )
 
+    conn.execute("drop table if exists tmp_kaikki_form_cleanup")
     conn.execute(
         """
         create temporary table tmp_kaikki_form_cleanup (
@@ -191,45 +274,48 @@ def _clear_owned_forms_and_senses(conn, source_file_id: int, replace_snapshot: b
         """
     )
     conn.execute(
-        f"""
-        insert into tmp_kaikki_form_cleanup (form_id)
-        select distinct ownership.form_id
-        from lexicon.form_source ownership
-        join lexicon.form f on f.id = ownership.form_id
-        join lexicon.lexeme l on l.id = f.lexeme_id
-        where ownership.source_file_id in ({source_ids_sql})
-          and not exists (
-              select 1
-              from tmp_kaikki_form_snapshot_key incoming
-              where incoming.lemma = l.lemma
-                and incoming.part_of_speech = l.part_of_speech
-                and incoming.normalized_form = f.normalized_form
-                and incoming.features = f.features
-          )
-        on conflict do nothing
-        """,
+        sql.SQL(
+            """
+            insert into tmp_kaikki_form_cleanup (form_id)
+            select distinct ownership.form_id
+            from lexicon.form_source ownership
+            join lexicon.form f on f.id = ownership.form_id
+            join lexicon.lexeme l on l.id = f.lexeme_id
+            where ownership.source_file_id in ({source_ids_sql})
+              and not exists (
+                  select 1
+                  from tmp_kaikki_form_snapshot_key incoming
+                  where incoming.lemma = l.lemma
+                    and incoming.part_of_speech = l.part_of_speech
+                    and incoming.normalized_form = f.normalized_form
+                    and incoming.features = f.features
+              )
+            on conflict do nothing
+            """
+        ).format(source_ids_sql=source_ids_sql),
         params,
     )
     conn.execute("analyze tmp_kaikki_form_cleanup")
     conn.execute(
-        f"""
-        delete from lexicon.form_source ownership
-        using tmp_kaikki_form_cleanup stale
-        where ownership.form_id = stale.form_id
-          and ownership.source_file_id in ({source_ids_sql})
-        """,
+        sql.SQL(
+            """
+            delete from lexicon.form_source ownership
+            using tmp_kaikki_form_cleanup stale
+            where ownership.form_id = stale.form_id
+              and ownership.source_file_id in ({source_ids_sql})
+            """
+        ).format(source_ids_sql=source_ids_sql),
         params,
     )
     if replace_snapshot:
-        # A replacement may leave older Kaikki source files attached to rows
-        # that are still present in the new snapshot. Keep only the current
-        # file's claim for those rows; the current claim is retained above.
         conn.execute(
-            f"""
-            delete from lexicon.form_source
-            where source_file_id in ({source_ids_sql})
-              and source_file_id <> %s
-            """,
+            sql.SQL(
+                """
+                delete from lexicon.form_source
+                where source_file_id in ({source_ids_sql})
+                  and source_file_id <> %s
+                """
+            ).format(source_ids_sql=source_ids_sql),
             (source_file_id,),
         )
     _delete_stale_forms_in_batches(conn)
@@ -240,9 +326,10 @@ def _clear_owned_forms_and_senses(conn, source_file_id: int, replace_snapshot: b
     )
 
 
-def _delete_stale_forms_in_batches(conn) -> int:
+def _delete_stale_forms_in_batches(conn: psycopg.Connection) -> int:
     """Delete stale forms in bounded statements instead of one huge cascade."""
 
+    conn.execute("drop table if exists tmp_kaikki_form_batch")
     conn.execute(
         """
         create temporary table tmp_kaikki_form_batch (
@@ -271,18 +358,13 @@ def _delete_stale_forms_in_batches(conn) -> int:
             """,
             (last_form_id, _FORM_CLEANUP_BATCH_SIZE),
         )
-        batch_size = int(
-            conn.execute("select count(*) from tmp_kaikki_form_batch").fetchone()[0]
-        )
+        count_row = conn.execute("select count(*) from tmp_kaikki_form_batch").fetchone()
+        batch_size = int(count_row[0]) if count_row else 0
         if batch_size == 0:
             break
-        last_form_id = int(
-            conn.execute("select max(form_id) from tmp_kaikki_form_batch").fetchone()[0]
-        )
+        max_row = conn.execute("select max(form_id) from tmp_kaikki_form_batch").fetchone()
+        last_form_id = int(max_row[0]) if max_row and max_row[0] is not None else last_form_id
 
-        # Remove validation rows set-wise first. The form FK is ON DELETE
-        # CASCADE, but making this explicit avoids a per-form cascade lookup
-        # for a multi-million-row cleanup.
         conn.execute(
             """
             delete from lexicon.form_validation validation
@@ -299,13 +381,18 @@ def _delete_stale_forms_in_batches(conn) -> int:
         )
         deleted_total += batch_size
         if deleted_total % 100_000 < batch_size:
-            print(f"[kaikki] deleted stale forms: {deleted_total}", flush=True)
+            print(
+                f"[kaikki] deleted stale forms: {deleted_total}",
+                flush=True,
+                file=sys.stderr,
+            )
 
     conn.execute("drop table tmp_kaikki_form_batch")
     return deleted_total
 
 
-def _upsert_lexemes(conn) -> None:
+def _upsert_lexemes(conn: psycopg.Connection) -> None:
+    conn.execute("drop table if exists tmp_kaikki_lexeme_key")
     conn.execute(
         """
         create temporary table tmp_kaikki_lexeme_key (
@@ -322,6 +409,7 @@ def _upsert_lexemes(conn) -> None:
         on conflict do nothing
         """
     )
+    conn.execute("drop table if exists tmp_kaikki_lexeme_map")
     conn.execute(
         """
         create temporary table tmp_kaikki_lexeme_map (
@@ -359,7 +447,8 @@ def _upsert_lexemes(conn) -> None:
     )
 
 
-def _upsert_senses(conn, source_file_id: int) -> None:
+def _upsert_senses(conn: psycopg.Connection, source_file_id: int | None) -> None:
+    conn.execute("drop table if exists tmp_kaikki_sense_data")
     conn.execute(
         """
         create temporary table tmp_kaikki_sense_data (
@@ -413,6 +502,7 @@ def _upsert_senses(conn, source_file_id: int) -> None:
           and gloss.gloss_en is not null
         """
     )
+    conn.execute("drop table if exists tmp_kaikki_sense_map")
     conn.execute(
         """
         create temporary table tmp_kaikki_sense_map (
@@ -447,15 +537,17 @@ def _upsert_senses(conn, source_file_id: int) -> None:
         from upserted
         """
     )
-    conn.execute(
-        """
-        insert into lexicon.sense_source (sense_id, source_file_id)
-        select sense_id, %s
-        from tmp_kaikki_sense_map
-        on conflict do nothing
-        """,
-        (source_file_id,),
-    )
+    if source_file_id is not None:
+        conn.execute(
+            """
+            insert into lexicon.sense_source (sense_id, source_file_id)
+            select sense_id, %s
+            from tmp_kaikki_sense_map
+            on conflict do nothing
+            """,
+            (source_file_id,),
+        )
+    conn.execute("drop table if exists tmp_kaikki_present_sense")
     conn.execute(
         """
         create temporary table tmp_kaikki_present_sense (
@@ -474,7 +566,9 @@ def _upsert_senses(conn, source_file_id: int) -> None:
     )
 
 
-def _upsert_forms(conn, source_file_id: int, replace_snapshot: bool) -> None:
+def _upsert_forms(
+    conn: psycopg.Connection, source_file_id: int | None, replace_snapshot: bool
+) -> None:
     conn.execute(
         """
         insert into lexicon.form (
@@ -485,25 +579,26 @@ def _upsert_forms(conn, source_file_id: int, replace_snapshot: bool) -> None:
         on conflict (lexeme_id, normalized_form, form_kind, features) do nothing
         """
     )
-    conn.execute(
-        """
-        insert into lexicon.form_source (form_id, source_file_id)
-        select f.id, %s
-        from tmp_kaikki_form_key k
-        join lexicon.form f
-          on f.lexeme_id = k.lexeme_id
-         and f.normalized_form = k.normalized_form
-         and f.features = k.features
-         and f.form_kind = 'kaikki'
-        left join lexicon.form_source existing
-          on existing.form_id = f.id
-         and existing.source_file_id = %s
-        where f.form_kind = 'kaikki'
-          and existing.form_id is null
-        """,
-        (source_file_id, source_file_id),
-    )
-    if replace_snapshot:
+    if source_file_id is not None:
+        conn.execute(
+            """
+            insert into lexicon.form_source (form_id, source_file_id)
+            select f.id, %s
+            from tmp_kaikki_form_key k
+            join lexicon.form f
+              on f.lexeme_id = k.lexeme_id
+             and f.normalized_form = k.normalized_form
+             and f.features = k.features
+             and f.form_kind = 'kaikki'
+            left join lexicon.form_source existing
+              on existing.form_id = f.id
+             and existing.source_file_id = %s
+            where f.form_kind = 'kaikki'
+              and existing.form_id is null
+            """,
+            (source_file_id, source_file_id),
+        )
+    if replace_snapshot and source_file_id is not None:
         conn.execute(
             """
             delete from lexicon.form f
@@ -516,29 +611,47 @@ def _upsert_forms(conn, source_file_id: int, replace_snapshot: bool) -> None:
         )
 
 
-def _upsert_auxiliary_rows(conn, source_file_id: int) -> None:
+def _upsert_auxiliary_rows(conn: psycopg.Connection, source_file_id: int | None) -> None:
     conn.execute(
         """
-        insert into lexicon.pronunciation (lexeme_id, ipa, tts_voice)
-        select distinct e.lexeme_id, e.payload->'sounds'->0->>'ipa', 'fi'
+        insert into lexicon.pronunciation (lexeme_id, ipa, syllabification, tts_voice)
+        select distinct on (e.lexeme_id, btrim(s.sound->>'ipa'))
+            e.lexeme_id,
+            btrim(s.sound->>'ipa'),
+            nullif(
+                btrim(coalesce(s.sound->>'syllabification', e.payload->>'syllabification', '')),
+                ''
+            ),
+            'fi'
         from tmp_kaikki_entry e
-        where btrim(e.payload->'sounds'->0->>'ipa') <> ''
-        on conflict do nothing
+        cross join lateral jsonb_array_elements(
+            coalesce(e.payload->'sounds', '[]'::jsonb)
+        ) with ordinality as s(sound, ord)
+        where btrim(coalesce(s.sound->>'ipa', '')) <> ''
+        order by e.lexeme_id, btrim(s.sound->>'ipa'), s.ord
+        on conflict (lexeme_id, ipa) do update
+        set syllabification = coalesce(
+            excluded.syllabification,
+            lexicon.pronunciation.syllabification
+        )
         """
     )
-    conn.execute(
-        """
-        insert into lexicon.pronunciation_source (pronunciation_id, source_file_id)
-        select distinct p.id, %s
-        from lexicon.pronunciation p
-        join tmp_kaikki_entry e
-          on e.lexeme_id = p.lexeme_id
-         and p.tts_voice = 'fi'
-         and p.ipa = e.payload->'sounds'->0->>'ipa'
-        on conflict do nothing
-        """,
-        (source_file_id,),
-    )
+    if source_file_id is not None:
+        conn.execute(
+            """
+            insert into lexicon.pronunciation_source (pronunciation_id, source_file_id)
+            select distinct p.id, %s
+            from lexicon.pronunciation p
+            join tmp_kaikki_entry e on e.lexeme_id = p.lexeme_id
+            cross join lateral jsonb_array_elements(
+                coalesce(e.payload->'sounds', '[]'::jsonb)
+            ) s(sound)
+            where p.tts_voice = 'fi'
+              and p.ipa = btrim(s.sound->>'ipa')
+            on conflict do nothing
+            """,
+            (source_file_id,),
+        )
     conn.execute(
         """
         insert into lexicon.grammar_note (lexeme_id, note_en, note_kind)
@@ -550,20 +663,21 @@ def _upsert_auxiliary_rows(conn, source_file_id: int) -> None:
         do nothing
         """
     )
-    conn.execute(
-        """
-        insert into lexicon.grammar_note_source (grammar_note_id, source_file_id)
-        select distinct gn.id, %s
-        from lexicon.grammar_note gn
-        join tmp_kaikki_entry e
-          on e.lexeme_id = gn.lexeme_id
-         and gn.sense_id is null
-         and gn.note_kind = 'etymology'
-         and gn.note_en = btrim(e.payload->>'etymology_text')
-        on conflict do nothing
-        """,
-        (source_file_id,),
-    )
+    if source_file_id is not None:
+        conn.execute(
+            """
+            insert into lexicon.grammar_note_source (grammar_note_id, source_file_id)
+            select distinct gn.id, %s
+            from lexicon.grammar_note gn
+            join tmp_kaikki_entry e
+              on e.lexeme_id = gn.lexeme_id
+             and gn.sense_id is null
+             and gn.note_kind = 'etymology'
+             and gn.note_en = btrim(e.payload->>'etymology_text')
+            on conflict do nothing
+            """,
+            (source_file_id,),
+        )
     conn.execute(
         """
         insert into lexicon.derivation_relation (
@@ -584,6 +698,7 @@ def _upsert_auxiliary_rows(conn, source_file_id: int) -> None:
         order by
             e.lexeme_id,
             btrim(d.item->>'word'),
+            child.is_lemma desc,
             exists (
                 select 1
                 from lexicon.lexeme_sense ls
@@ -595,28 +710,86 @@ def _upsert_auxiliary_rows(conn, source_file_id: int) -> None:
         on conflict (parent_lexeme_id, child_lexeme_id, relation_type, note) do nothing
         """
     )
+    if source_file_id is not None:
+        conn.execute(
+            """
+            insert into lexicon.derivation_relation_source (relation_id, source_file_id)
+            select distinct dr.id, %s
+            from lexicon.derivation_relation dr
+            join tmp_kaikki_entry e on e.lexeme_id = dr.parent_lexeme_id
+            cross join lateral jsonb_array_elements(
+                coalesce(e.payload->'derived', '[]'::jsonb)
+            ) d(item)
+            join lexicon.lexeme child
+              on child.lemma = btrim(d.item->>'word')
+             and child.id = dr.child_lexeme_id
+            where dr.relation_type = 'derived-term'
+              and dr.note = 'kaikki-derived'
+              and btrim(d.item->>'word') <> ''
+            on conflict do nothing
+            """,
+            (source_file_id,),
+        )
     conn.execute(
         """
-        insert into lexicon.derivation_relation_source (relation_id, source_file_id)
-        select distinct dr.id, %s
-        from lexicon.derivation_relation dr
-        join tmp_kaikki_entry e on e.lexeme_id = dr.parent_lexeme_id
-        cross join lateral jsonb_array_elements(
-            coalesce(e.payload->'derived', '[]'::jsonb)
-        ) d(item)
-        join lexicon.lexeme child
-          on child.lemma = btrim(d.item->>'word')
-         and child.id = dr.child_lexeme_id
-        where dr.relation_type = 'derived-term'
-          and dr.note = 'kaikki-derived'
-          and btrim(d.item->>'word') <> ''
-        on conflict do nothing
-        """,
-        (source_file_id,),
+        with incoming_relations as (
+            select distinct on (e.lexeme_id, btrim(r.item->>'word'), btrim(r.item->>'type'))
+                e.lexeme_id as source_lexeme_id,
+                target.id as target_lexeme_id,
+                btrim(r.item->>'type') as relation_type
+            from tmp_kaikki_entry e
+            cross join lateral jsonb_array_elements(
+                coalesce(e.payload->'relations', '[]'::jsonb)
+            ) r(item)
+            join lexicon.lexeme target
+              on target.lemma = btrim(r.item->>'word')
+             and target.id <> e.lexeme_id
+            where btrim(coalesce(r.item->>'word', '')) <> ''
+              and btrim(coalesce(r.item->>'type', '')) <> ''
+            order by
+                e.lexeme_id,
+                btrim(r.item->>'word'),
+                btrim(r.item->>'type'),
+                target.is_lemma desc,
+                (target.part_of_speech = e.part_of_speech) desc,
+                target.id
+        )
+        insert into lexicon.lexical_relation (
+            source_lexeme_id, target_lexeme_id, relation_type, confidence
+        )
+        select inc.source_lexeme_id, inc.target_lexeme_id, inc.relation_type, 0.95
+        from incoming_relations inc
+        where not exists (
+            select 1
+            from lexicon.lexical_relation existing
+            where existing.source_lexeme_id = inc.source_lexeme_id
+              and existing.target_lexeme_id = inc.target_lexeme_id
+              and existing.relation_type = inc.relation_type
+        )
+        """
     )
+    if source_file_id is not None:
+        conn.execute(
+            """
+            insert into lexicon.lexical_relation_source (relation_id, source_file_id)
+            select distinct existing.id, %s
+            from lexicon.lexical_relation existing
+            join tmp_kaikki_entry e on e.lexeme_id = existing.source_lexeme_id
+            cross join lateral jsonb_array_elements(
+                coalesce(e.payload->'relations', '[]'::jsonb)
+            ) r(item)
+            join lexicon.lexeme target
+              on target.id = existing.target_lexeme_id
+             and target.lemma = btrim(r.item->>'word')
+            where existing.relation_type = btrim(r.item->>'type')
+            on conflict do nothing
+            """,
+            (source_file_id,),
+        )
 
 
-def _upsert_sense_metadata(conn, source_file_id: int) -> None:
+def _upsert_sense_metadata(conn: psycopg.Connection, source_file_id: int | None) -> None:
+    conn.execute("drop table if exists tmp_kaikki_sense_text")
     conn.execute(
         """
         create temporary table tmp_kaikki_sense_text (
@@ -662,19 +835,21 @@ def _upsert_sense_metadata(conn, source_file_id: int) -> None:
         do nothing
         """
     )
-    conn.execute(
-        """
-        insert into lexicon.grammar_note_source (grammar_note_id, source_file_id)
-        select distinct gn.id, %s
-        from lexicon.grammar_note gn
-        join tmp_kaikki_sense_text t
-          on t.sense_id = gn.sense_id
-         and t.text_en = gn.note_en
-         and t.note_kind = gn.note_kind
-        on conflict do nothing
-        """,
-        (source_file_id,),
-    )
+    if source_file_id is not None:
+        conn.execute(
+            """
+            insert into lexicon.grammar_note_source (grammar_note_id, source_file_id)
+            select distinct gn.id, %s
+            from lexicon.grammar_note gn
+            join tmp_kaikki_sense_text t
+              on t.sense_id = gn.sense_id
+             and t.text_en = gn.note_en
+             and t.note_kind = gn.note_kind
+            on conflict do nothing
+            """,
+            (source_file_id,),
+        )
+    conn.execute("drop table if exists tmp_kaikki_warning")
     conn.execute(
         """
         create temporary table tmp_kaikki_warning (
@@ -710,19 +885,21 @@ def _upsert_sense_metadata(conn, source_file_id: int) -> None:
         do nothing
         """
     )
-    conn.execute(
-        """
-        insert into lexicon.usage_warning_source (usage_warning_id, source_file_id)
-        select distinct uw.id, %s
-        from lexicon.usage_warning uw
-        join tmp_kaikki_warning t
-          on t.sense_id = uw.sense_id
-         and t.warning_en = uw.warning_en
-         and t.warning_kind = uw.warning_kind
-        on conflict do nothing
-        """,
-        (source_file_id,),
-    )
+    if source_file_id is not None:
+        conn.execute(
+            """
+            insert into lexicon.usage_warning_source (usage_warning_id, source_file_id)
+            select distinct uw.id, %s
+            from lexicon.usage_warning uw
+            join tmp_kaikki_warning t
+              on t.sense_id = uw.sense_id
+             and t.warning_en = uw.warning_en
+             and t.warning_kind = uw.warning_kind
+            on conflict do nothing
+            """,
+            (source_file_id,),
+        )
+    conn.execute("drop table if exists tmp_kaikki_topic")
     conn.execute(
         """
         create temporary table tmp_kaikki_topic (
@@ -789,73 +966,79 @@ def _upsert_sense_metadata(conn, source_file_id: int) -> None:
             updated_at = now()
         """
     )
-    conn.execute(
-        """
-        insert into lexicon.lexeme_topic_source (lexeme_topic_id, source_file_id)
-        select distinct lt.id, %s
-        from lexicon.lexeme_topic lt
-        join tmp_kaikki_topic t
-          on t.lexeme_id = lt.lexeme_id
-         and t.sense_id = lt.sense_id
-         and t.topic_id = lt.topic_id
-         and lt.source = 'kaikki-topic'
-        on conflict do nothing
-        """,
-        (source_file_id,),
-    )
-
-
-KAIKKI_EXAMPLE_QUALITY = 0.70
-
-
-def _write_kaikki_examples(conn, tmp_table: str) -> None:
-    conn.execute(
-        f"""
-        insert into lexicon.example (text_fi, text_en, source_label, quality_score)
-        select distinct incoming.text_fi, incoming.text_en, 'kaikki', %s
-        from {tmp_table} incoming
-        where not exists (
-            select 1
-            from lexicon.example existing
-            where existing.source_label = 'kaikki'
-              and existing.text_fi = incoming.text_fi
+    if source_file_id is not None:
+        conn.execute(
+            """
+            insert into lexicon.lexeme_topic_source (lexeme_topic_id, source_file_id)
+            select distinct lt.id, %s
+            from lexicon.lexeme_topic lt
+            join tmp_kaikki_topic t
+              on t.lexeme_id = lt.lexeme_id
+             and t.sense_id = lt.sense_id
+             and t.topic_id = lt.topic_id
+             and lt.source = 'kaikki-topic'
+            on conflict do nothing
+            """,
+            (source_file_id,),
         )
-        """,
+
+
+def _write_kaikki_examples(conn: psycopg.Connection, tmp_table: str) -> None:
+    table_ident = sql.Identifier(tmp_table)
+    conn.execute(
+        sql.SQL(
+            """
+            insert into lexicon.example (text_fi, text_en, source_label, quality_score)
+            select distinct incoming.text_fi, incoming.text_en, 'kaikki', %s
+            from {} incoming
+            where not exists (
+                select 1
+                from lexicon.example existing
+                where existing.source_label = 'kaikki'
+                  and existing.text_fi = incoming.text_fi
+            )
+            """
+        ).format(table_ident),
         (KAIKKI_EXAMPLE_QUALITY,),
     )
     conn.execute(
-        f"""
-        update lexicon.example existing
-        set text_en = incoming.text_en
-        from {tmp_table} incoming
-        where existing.source_label = 'kaikki'
-          and existing.text_fi = incoming.text_fi
-          and existing.text_en is null
-          and incoming.text_en is not null
-        """
+        sql.SQL(
+            """
+            update lexicon.example existing
+            set text_en = incoming.text_en
+            from {} incoming
+            where existing.source_label = 'kaikki'
+              and existing.text_fi = incoming.text_fi
+              and existing.text_en is null
+              and incoming.text_en is not null
+            """
+        ).format(table_ident)
     )
     conn.execute(
-        f"""
-        insert into lexicon.sense_example (sense_id, example_id, is_core, sort_order)
-        select incoming.sense_id, example.id, false, incoming.sort_order
-        from {tmp_table} incoming
-        join lexicon.example example
-          on example.source_label = 'kaikki'
-         and example.text_fi = incoming.text_fi
-        where not exists (
-            select 1
-            from lexicon.sense_example existing
-            join lexicon.example existing_example on existing_example.id = existing.example_id
-            where existing.sense_id = incoming.sense_id
-              and existing_example.text_fi = incoming.text_fi
-        )
-        on conflict (sense_id, example_id) do update
-        set sort_order = least(lexicon.sense_example.sort_order, excluded.sort_order)
-        """
+        sql.SQL(
+            """
+            insert into lexicon.sense_example (sense_id, example_id, is_core, sort_order)
+            select incoming.sense_id, example.id, false, incoming.sort_order
+            from {} incoming
+            join lexicon.example example
+              on example.source_label = 'kaikki'
+             and example.text_fi = incoming.text_fi
+            where not exists (
+                select 1
+                from lexicon.sense_example existing
+                join lexicon.example existing_example on existing_example.id = existing.example_id
+                where existing.sense_id = incoming.sense_id
+                  and existing_example.text_fi = incoming.text_fi
+            )
+            on conflict (sense_id, example_id) do update
+            set sort_order = least(lexicon.sense_example.sort_order, excluded.sort_order)
+            """
+        ).format(table_ident)
     )
 
 
-def _upsert_examples(conn) -> None:
+def _upsert_examples(conn: psycopg.Connection) -> None:
+    conn.execute("drop table if exists tmp_kaikki_example")
     conn.execute(
         """
         create temporary table tmp_kaikki_example (
@@ -900,25 +1083,26 @@ def _upsert_examples(conn) -> None:
     _write_kaikki_examples(conn, "tmp_kaikki_example")
 
 
-def upsert_staged_kaikki_entries(
-    conn,
+def _run_prepared_kaikki_projection(
+    conn: psycopg.Connection,
     *,
-    source_file_id: int,
+    entry_count: int,
+    source_file_id: int | None,
     replace_snapshot: bool,
-    allow_empty_snapshot: bool = False,
+    allow_empty_snapshot: bool,
 ) -> None:
-    """Project one staged snapshot with bounded round trips."""
-
-    entry_count = _prepare_staged_entries(conn, source_file_id)
+    if replace_snapshot and source_file_id is None:
+        raise ValueError("replace_snapshot requires a Kaikki source_file_id")
     if replace_snapshot and not allow_empty_snapshot and entry_count == 0:
         raise RuntimeError("refusing to replace Kaikki forms from an empty projected snapshot")
 
     if entry_count:
         _upsert_lexemes(conn)
     _prepare_staged_form_keys(conn)
-    _clear_owned_forms_and_senses(conn, source_file_id, replace_snapshot)
+    if source_file_id is not None:
+        _clear_owned_forms_and_senses(conn, source_file_id, replace_snapshot)
     if entry_count == 0:
-        if replace_snapshot:
+        if replace_snapshot and source_file_id is not None:
             conn.execute(
                 """
                 delete from lexicon.form f
@@ -930,12 +1114,55 @@ def upsert_staged_kaikki_entries(
                 """
             )
             _delete_orphan_kaikki_senses(conn)
+            refresh_lexeme_is_lemma_flags(conn)
         return
 
     _upsert_senses(conn, source_file_id)
+    refresh_lexeme_is_lemma_flags(conn)
     _upsert_examples(conn)
     _upsert_forms(conn, source_file_id, replace_snapshot)
     _upsert_auxiliary_rows(conn, source_file_id)
     _upsert_sense_metadata(conn, source_file_id)
 
-    _delete_orphan_kaikki_senses(conn)
+    if source_file_id is not None:
+        _delete_orphan_kaikki_senses(conn)
+    refresh_lexeme_is_lemma_flags(conn)
+
+
+def upsert_staged_kaikki_entries(
+    conn: psycopg.Connection,
+    *,
+    source_file_id: int,
+    replace_snapshot: bool,
+    allow_empty_snapshot: bool = False,
+) -> None:
+    """Project one staged snapshot with bounded round trips."""
+
+    entry_count = _prepare_staged_entries(conn, source_file_id)
+    _run_prepared_kaikki_projection(
+        conn,
+        entry_count=entry_count,
+        source_file_id=source_file_id,
+        replace_snapshot=replace_snapshot,
+        allow_empty_snapshot=allow_empty_snapshot,
+    )
+
+
+def upsert_kaikki_entry_iterable(
+    conn: psycopg.Connection,
+    entries: Iterable[dict],
+    *,
+    source_file_id: int | None = None,
+    replace_snapshot: bool = False,
+    allow_empty_snapshot: bool = False,
+) -> None:
+    """Project an iterable of Kaikki entries through the unified bulk projector."""
+
+    entry_count = _prepare_iterable_entries(conn, entries)
+    _run_prepared_kaikki_projection(
+        conn,
+        entry_count=entry_count,
+        source_file_id=source_file_id,
+        replace_snapshot=replace_snapshot,
+        allow_empty_snapshot=allow_empty_snapshot,
+    )

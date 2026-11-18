@@ -10,7 +10,10 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE.md"]
 requires-python = ">=3.12"
-dependencies = ["psycopg[binary]>=3.2"]
+dependencies = [
+  "opencc-python-reimplemented>=0.1.7",
+  "psycopg[binary]>=3.2",
+]
 keywords = ["finnish", "lexicon", "wiktionary", "omorfi", "tatoeba", "nlp"]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -27,7 +30,7 @@ omorfi = ["omorfi", "pyhfst"]
 ofl = "open_finnish_lexicon.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "ty>=0.0.1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -37,10 +40,13 @@ open_finnish_lexicon = ["source_releases.toml", "migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "db: tests requiring a live PostgreSQL test database",
+]
 
 [tool.ruff]
 line-length = 110
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F"]
+select = ["E4", "E7", "E9", "F", "B", "UP"]

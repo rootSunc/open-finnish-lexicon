@@ -9,25 +9,25 @@ from open_finnish_lexicon.normalize.lexemes.merge.refs import _merge_direct_lexe
 from open_finnish_lexicon.normalize.lexemes.merge.senses import _merge_sense_rows
 
 def _merge_lexeme_metadata(conn, source_lexeme_id: int, target_lexeme_id: int) -> None:
-    source_rank_row = conn.execute(
-        "select frequency_rank from lexicon.lexeme where id = %s",
+    source_row = conn.execute(
+        "select frequency_rank, is_lemma from lexicon.lexeme where id = %s",
         (source_lexeme_id,),
     ).fetchone()
-    if source_rank_row is None:
+    if source_row is None:
         return
-    source_rank = source_rank_row[0]
-    if source_rank is None:
-        return
+    source_rank, source_is_lemma = source_row
     conn.execute(
         """
         update lexicon.lexeme
         set frequency_rank = case
-            when frequency_rank is null then %s
-            else least(frequency_rank, %s)
-        end
+                when %s::integer is null then frequency_rank
+                when frequency_rank is null then %s
+                else least(frequency_rank, %s)
+            end,
+            is_lemma = is_lemma or coalesce(%s, false)
         where id = %s
         """,
-        (source_rank, source_rank, target_lexeme_id),
+        (source_rank, source_rank, source_rank, source_is_lemma, target_lexeme_id),
     )
 
 

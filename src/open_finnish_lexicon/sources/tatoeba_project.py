@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from pathlib import Path
+import psycopg
 
 from open_finnish_lexicon.db import connection_scope
 from open_finnish_lexicon.sources.tatoeba_loader import TatoebaEntry, ingest_tatoeba
@@ -6,25 +9,31 @@ from open_finnish_lexicon.sources.warehouse import source_file_id_for_path
 
 
 def project_tatoeba_rows(
-    input_path: Path, *, source_file_id: int | None = None, connection=None
+    input_path: Path,
+    *,
+    source_file_id: int | None = None,
+    connection: psycopg.Connection | None = None,
+    **_kwargs: object,
 ) -> int:
     owns_connection = connection is None
     with connection_scope(connection) as conn:
-        source_file_id = source_file_id_for_path(
+        resolved_file_id = source_file_id_for_path(
             conn,
             source_name="tatoeba",
             local_path=input_path,
             source_file_id=source_file_id,
+            allow_active=source_file_id is not None,
         )
-        source_kind = conn.execute(
+        kind_row = conn.execute(
             """
             select sr.source_kind
             from warehouse.source_file sf
             join warehouse.source_registry sr on sr.id = sf.source_registry_id
             where sf.id = %s
             """,
-            (source_file_id,),
-        ).fetchone()[0]
+            (resolved_file_id,),
+        ).fetchone()
+        source_kind = str(kind_row[0]) if kind_row else "tsv"
         staged_entries: list[TatoebaEntry] = []
         for external_id, payload in conn.execute(
             """
@@ -33,7 +42,7 @@ def project_tatoeba_rows(
             where source_file_id = %s
             order by id
             """,
-            (source_file_id,),
+            (resolved_file_id,),
         ).fetchall():
             if not isinstance(payload, dict):
                 continue
@@ -87,4 +96,4 @@ def project_tatoeba_rows(
         ingest_tatoeba(input_path, entries=staged_entries, connection=conn)
         if owns_connection:
             conn.commit()
-    return source_file_id
+    return resolved_file_id

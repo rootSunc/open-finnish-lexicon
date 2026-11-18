@@ -1,27 +1,15 @@
+from __future__ import annotations
+
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 import re
 
+from open_finnish_lexicon.normalize.lexemes.types import normalize_part_of_speech
 
 TYPE_DECL_RE = re.compile(
     r"^(?P<subject>\S+)\s+(?:a|rdf:type)\s+(?P<types>.*?)(?:\s*;|\s*\.)",
     re.DOTALL,
 )
-POS_ALIASES = {
-    "adjective": "adj",
-    "adverb": "adv",
-    "conjunction": "conj",
-    "determiner": "det",
-    "interjection": "intj",
-    "noun": "noun",
-    "numeral": "num",
-    "postposition": "postp",
-    "preposition": "prep",
-    "pronoun": "pron",
-    "propernoun": "name",
-    "proper_noun": "name",
-    "verb": "verb",
-}
 
 
 def _iter_turtle_statements(path: Path) -> Iterator[str]:
@@ -68,7 +56,11 @@ def _iter_turtle_statements(path: Path) -> Iterator[str]:
 
 
 def _extract_predicate_object(statement: str, predicate: str) -> str | None:
-    match = re.search(rf"\b{re.escape(predicate)}\s+(.*?)(?=(?:\s*;\s+\S+\s)|\s*\.$)", statement, re.DOTALL)
+    match = re.search(
+        rf"\b{re.escape(predicate)}\s+(.*?)(?=(?:\s*;\s+\S+\s)|\s*\.$)",
+        statement,
+        re.DOTALL,
+    )
     if not match:
         return None
     return match.group(1).strip()
@@ -83,7 +75,11 @@ def _extract_literal(statement: str, predicate: str) -> tuple[str, str | None] |
     value = _extract_predicate_object(statement, predicate)
     if value is None:
         return None
-    match = re.match(r"\"(?P<literal>(?:[^\"\\]|\\.)*)\"(?:@(?P<lang>[\w-]+))?", value, re.DOTALL)
+    match = re.match(
+        r"\"(?P<literal>(?:[^\"\\]|\\.)*)\"(?:@(?P<lang>[\w-]+))?",
+        value,
+        re.DOTALL,
+    )
     if not match:
         return None
     return match.group("literal"), match.group("lang")
@@ -123,10 +119,10 @@ def _is_finnish_language(language_code: str | None) -> bool:
     return language_code in {"fi", "fin"}
 
 
-def _normalize_part_of_speech(value: str) -> str:
+def _normalize_rdf_part_of_speech(value: str) -> str:
     normalized = value.strip().strip("<>").rsplit("/", 1)[-1].rsplit("#", 1)[-1]
     normalized = normalized.rsplit(":", 1)[-1].replace("-", "_").casefold()
-    return POS_ALIASES.get(normalized, normalized)
+    return normalize_part_of_speech(normalized)
 
 
 def _split_object_list(raw_value: str | None) -> list[str]:
@@ -135,11 +131,14 @@ def _split_object_list(raw_value: str | None) -> list[str]:
     return [item.strip() for item in raw_value.split(",") if item.strip()]
 
 
-def _load_finnish_entry_metadata(core_path: Path) -> tuple[dict[str, tuple[str, str, int, int]], set[str]]:
+def _load_finnish_entry_metadata(
+    core_path: Path,
+) -> tuple[dict[str, tuple[str, str, int, int]], set[str], dict[str, str]]:
     entry_by_sense: dict[str, tuple[str, str, int, int]] = {}
+    sole_sense_by_entry: dict[str, str] = {}
     needed_form_ids: set[str] = set()
     lemma_by_form_id: dict[str, str] = {}
-    pending_entries: list[tuple[str, str, list[str]]] = []
+    pending_entries: list[tuple[str, str, str, list[str]]] = []
 
     for statement in _iter_turtle_statements(core_path):
         entry_subject = _type_subject(statement, "ontolex:LexicalEntry")
@@ -154,7 +153,9 @@ def _load_finnish_entry_metadata(core_path: Path) -> tuple[dict[str, tuple[str, 
             if not part_of_speech or not canonical_form or not sense_ids:
                 continue
 
-            pending_entries.append((canonical_form, _normalize_part_of_speech(part_of_speech), sense_ids))
+            pending_entries.append(
+                (entry_subject, canonical_form, _normalize_rdf_part_of_speech(part_of_speech), sense_ids)
+            )
             needed_form_ids.add(canonical_form)
             continue
 
@@ -169,25 +170,26 @@ def _load_finnish_entry_metadata(core_path: Path) -> tuple[dict[str, tuple[str, 
             continue
         lemma_by_form_id[subject] = written_value.strip()
 
-    for form_id, part_of_speech, sense_ids in pending_entries:
+    for entry_subject, form_id, part_of_speech, sense_ids in pending_entries:
         lemma = lemma_by_form_id.get(form_id)
         if not lemma:
             continue
         sense_count = len(sense_ids)
+        if sense_count == 1:
+            sole_sense_by_entry[entry_subject] = sense_ids[0]
         for sense_index, sense_id in enumerate(sense_ids):
             entry_by_sense[sense_id] = (lemma, part_of_speech, sense_index, sense_count)
 
-    return entry_by_sense, set(entry_by_sense)
+    return entry_by_sense, set(entry_by_sense), sole_sense_by_entry
 
 
-def _load_finnish_sense_glosses(core_path: Path, needed_sense_ids: set[str]) -> dict[str, tuple[str, str | None]]:
+def _load_finnish_sense_glosses(
+    core_path: Path, needed_sense_ids: set[str]
+) -> dict[str, tuple[str, str | None]]:
     gloss_by_sense: dict[str, tuple[str, str | None]] = {}
     for statement in _iter_turtle_statements(core_path):
         sense_id = _type_subject(statement, "ontolex:LexicalSense")
-        if sense_id is None:
-            continue
-
-        if sense_id not in needed_sense_ids:
+        if sense_id is None or sense_id not in needed_sense_ids:
             continue
 
         gloss_match = re.search(
@@ -219,16 +221,10 @@ def _load_chinese_terms(
     needed_sense_ids: set[str],
     *,
     sense_id_by_translation_id: dict[str, str] | None = None,
+    sole_sense_by_entry: dict[str, str] | None = None,
 ) -> dict[str, list[str]]:
     chinese_terms_by_sense: dict[str, list[str]] = {}
     for statement in _iter_turtle_statements(path):
-        subject = _statement_subject(statement)
-        sense_id = _extract_predicate_object(statement, "dbnary:isTranslationOf")
-        if sense_id not in needed_sense_ids:
-            sense_id = (sense_id_by_translation_id or {}).get(subject or "")
-        if not sense_id or sense_id not in needed_sense_ids:
-            continue
-
         target_language = _extract_predicate_object(statement, "dbnary:targetLanguage")
         if target_language not in {"lexvo:cmn", "lexvo:zho"}:
             continue
@@ -237,42 +233,65 @@ def _load_chinese_terms(
         if not written_form:
             continue
 
-        chinese_terms_by_sense.setdefault(sense_id, [])
-        if written_form not in chinese_terms_by_sense[sense_id]:
-            chinese_terms_by_sense[sense_id].append(written_form)
+        subject = _statement_subject(statement)
+        raw_target = _extract_predicate_object(statement, "dbnary:isTranslationOf")
+        sense_id = raw_target if raw_target in needed_sense_ids else None
+        if sense_id is None and sense_id_by_translation_id is not None:
+            sense_id = sense_id_by_translation_id.get(subject or "")
+        if sense_id is None and raw_target and sole_sense_by_entry is not None:
+            sense_id = sole_sense_by_entry.get(raw_target)
+        if not sense_id or sense_id not in needed_sense_ids:
+            continue
+
+        terms = chinese_terms_by_sense.setdefault(sense_id, [])
+        if written_form not in terms:
+            terms.append(written_form)
     return chinese_terms_by_sense
 
 
 def read_dbnary_zh_candidates(core_path: Path, enhancement_path: Path) -> Iterable[dict]:
-    entry_by_sense, needed_sense_ids = _load_finnish_entry_metadata(core_path)
-    gloss_by_sense = _load_finnish_sense_glosses(core_path, needed_sense_ids)
+    entry_by_sense, needed_sense_ids, sole_sense_by_entry = _load_finnish_entry_metadata(core_path)
     sense_id_by_translation_id = _load_translation_sense_links(enhancement_path, needed_sense_ids)
-    chinese_terms_by_sense = _load_chinese_terms(enhancement_path, needed_sense_ids)
+    chinese_terms_by_sense = _load_chinese_terms(
+        enhancement_path,
+        needed_sense_ids,
+        sole_sense_by_entry=sole_sense_by_entry,
+    )
     for sense_id, terms in _load_chinese_terms(
         core_path,
         needed_sense_ids,
         sense_id_by_translation_id=sense_id_by_translation_id,
+        sole_sense_by_entry=sole_sense_by_entry,
     ).items():
-        chinese_terms_by_sense.setdefault(sense_id, [])
+        target_terms = chinese_terms_by_sense.setdefault(sense_id, [])
         for term in terms:
-            if term not in chinese_terms_by_sense[sense_id]:
-                chinese_terms_by_sense[sense_id].append(term)
+            if term not in target_terms:
+                target_terms.append(term)
+
+    if not chinese_terms_by_sense:
+        return
+
+    gloss_by_sense = _load_finnish_sense_glosses(core_path, set(chinese_terms_by_sense))
 
     grouped: dict[tuple[str, str, str, str | None, int, int], list[str]] = {}
-    for sense_id in sorted(needed_sense_ids):
+    for sense_id in sorted(chinese_terms_by_sense):
         entry = entry_by_sense.get(sense_id)
-        gloss = gloss_by_sense.get(sense_id)
         zh_terms = chinese_terms_by_sense.get(sense_id)
-        if entry is None or gloss is None or not zh_terms:
+        if entry is None or not zh_terms:
             continue
-
         lemma, part_of_speech, sense_index, source_sense_count = entry
-        gloss_text, gloss_language = gloss
+        gloss = gloss_by_sense.get(sense_id)
+        if gloss is None:
+            if source_sense_count != 1:
+                continue
+            gloss_text, gloss_language = "", None
+        else:
+            gloss_text, gloss_language = gloss
         key = (lemma, part_of_speech, gloss_text, gloss_language, sense_index, source_sense_count)
-        grouped.setdefault(key, [])
+        bucket = grouped.setdefault(key, [])
         for value in zh_terms:
-            if value and value not in grouped[key]:
-                grouped[key].append(value)
+            if value and value not in bucket:
+                bucket.append(value)
 
     for (
         lemma,

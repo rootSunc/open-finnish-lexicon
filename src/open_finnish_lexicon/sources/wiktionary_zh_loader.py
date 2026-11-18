@@ -1,13 +1,15 @@
+from __future__ import annotations
+
+from collections import Counter
+from collections.abc import Iterator
 import json
-from collections.abc import Iterable
 from pathlib import Path
 
-
-def _normalize_pos(value: str) -> str:
-    return value.strip().lower()
+from open_finnish_lexicon.normalize.lexemes.types import normalize_part_of_speech
 
 
-def read_wiktionary_zh_entries(input_path: Path) -> Iterable[dict]:
+def read_wiktionary_zh_entries(input_path: Path) -> Iterator[dict]:
+    seen_keys: Counter[tuple[str, str]] = Counter()
     with input_path.open(encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
@@ -26,7 +28,7 @@ def read_wiktionary_zh_entries(input_path: Path) -> Iterable[dict]:
                 continue
             if not isinstance(pos, str) or not pos.strip():
                 continue
-            sense_glosses = []
+            sense_glosses: list[list[str]] = []
             senses = entry.get("senses")
             if not isinstance(senses, list):
                 continue
@@ -46,10 +48,18 @@ def read_wiktionary_zh_entries(input_path: Path) -> Iterable[dict]:
             if not sense_glosses:
                 continue
             lemma = word.strip()
-            part_of_speech = _normalize_pos(pos)
+            part_of_speech = normalize_part_of_speech(pos)
+            key = (lemma, part_of_speech)
+            seen_keys[key] += 1
+            occurrence = seen_keys[key]
+            external_id = (
+                f"wiktionary_zh:{lemma}:{part_of_speech}"
+                if occurrence == 1
+                else f"wiktionary_zh:{lemma}:{part_of_speech}:{occurrence}"
+            )
             yield {
                 "lemma": lemma,
                 "part_of_speech": part_of_speech,
                 "sense_glosses": sense_glosses,
-                "external_id": f"wiktionary_zh:{lemma}:{part_of_speech}",
+                "external_id": external_id,
             }

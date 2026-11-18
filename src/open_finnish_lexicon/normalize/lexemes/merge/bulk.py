@@ -1,12 +1,13 @@
 """Bulk merge lexemes that have no senses."""
 
-
 from open_finnish_lexicon.normalize.lexemes.merge.batch import _delete_lexeme_ids_in_batches
+
 
 def _merge_no_sense_lexemes_bulk(conn, merge_pairs: list[tuple[int, int]]) -> None:
     if not merge_pairs:
         return
-    source_ids = [source_id for source_id, _target_id in merge_pairs]
+    deduped_pairs = list(dict.fromkeys(merge_pairs))
+    source_ids = [source_id for source_id, _target_id in deduped_pairs]
 
     with conn.cursor() as cursor:
         cursor.execute(
@@ -18,10 +19,32 @@ def _merge_no_sense_lexemes_bulk(conn, merge_pairs: list[tuple[int, int]]) -> No
             """
         )
         cursor.execute("truncate tmp_lexeme_merge")
-        cursor.executemany(
-            "insert into tmp_lexeme_merge (source_id, target_id) values (%s, %s)",
-            merge_pairs,
+        with cursor.copy("copy tmp_lexeme_merge (source_id, target_id) from stdin") as copy:
+            for source_id, target_id in deduped_pairs:
+                copy.write_row((source_id, target_id))
+
+    conn.execute(
+        """
+        with agg as (
+            select
+                m.target_id,
+                min(src.frequency_rank) as min_rank,
+                bool_or(src.is_lemma) as any_is_lemma
+            from tmp_lexeme_merge m
+            join lexicon.lexeme src on src.id = m.source_id
+            group by m.target_id
         )
+        update lexicon.lexeme tgt
+        set frequency_rank = case
+                when agg.min_rank is null then tgt.frequency_rank
+                when tgt.frequency_rank is null then agg.min_rank
+                else least(tgt.frequency_rank, agg.min_rank)
+            end,
+            is_lemma = tgt.is_lemma or coalesce(agg.any_is_lemma, false)
+        from agg
+        where tgt.id = agg.target_id
+        """
+    )
 
     conn.execute(
         """
@@ -85,7 +108,11 @@ def _merge_no_sense_lexemes_bulk(conn, merge_pairs: list[tuple[int, int]]) -> No
             p.tts_voice
         from lexicon.pronunciation p
         join tmp_lexeme_merge m on m.source_id = p.lexeme_id
-        on conflict do nothing
+        on conflict (lexeme_id, ipa) do update
+        set syllabification = coalesce(
+            lexicon.pronunciation.syllabification,
+            excluded.syllabification
+        )
         """
     )
     conn.execute(
@@ -99,7 +126,6 @@ def _merge_no_sense_lexemes_bulk(conn, merge_pairs: list[tuple[int, int]]) -> No
         join lexicon.pronunciation target
           on target.lexeme_id = m.target_id
          and target.ipa is not distinct from source.ipa
-         and target.syllabification is not distinct from source.syllabification
          and target.tts_voice = source.tts_voice
         on conflict do nothing
         """
@@ -138,18 +164,66 @@ def _merge_no_sense_lexemes_bulk(conn, merge_pairs: list[tuple[int, int]]) -> No
     )
     conn.execute(
         """
-        update lexicon.grammar_note gn
-        set lexeme_id = m.target_id
-        from tmp_lexeme_merge m
-        where gn.lexeme_id = m.source_id
+        insert into lexicon.grammar_note (lexeme_id, sense_id, note_fi, note_en, note_kind)
+        select distinct m.target_id, gn.sense_id, gn.note_fi, gn.note_en, gn.note_kind
+        from lexicon.grammar_note gn
+        join tmp_lexeme_merge m on m.source_id = gn.lexeme_id
+        on conflict do nothing
         """
     )
     conn.execute(
         """
-        update lexicon.usage_warning uw
-        set lexeme_id = m.target_id
-        from tmp_lexeme_merge m
-        where uw.lexeme_id = m.source_id
+        insert into lexicon.grammar_note_source (grammar_note_id, source_file_id)
+        select distinct target.id, ownership.source_file_id
+        from lexicon.grammar_note source
+        join lexicon.grammar_note_source ownership
+          on ownership.grammar_note_id = source.id
+        join tmp_lexeme_merge m on m.source_id = source.lexeme_id
+        join lexicon.grammar_note target
+          on target.lexeme_id = m.target_id
+         and target.sense_id is not distinct from source.sense_id
+         and target.note_fi is not distinct from source.note_fi
+         and target.note_en is not distinct from source.note_en
+         and target.note_kind = source.note_kind
+        on conflict do nothing
+        """
+    )
+    conn.execute(
+        """
+        delete from lexicon.grammar_note
+        where lexeme_id in (select source_id from tmp_lexeme_merge)
+        """
+    )
+    conn.execute(
+        """
+        insert into lexicon.usage_warning (lexeme_id, sense_id, warning_fi, warning_en, warning_kind)
+        select distinct m.target_id, uw.sense_id, uw.warning_fi, uw.warning_en, uw.warning_kind
+        from lexicon.usage_warning uw
+        join tmp_lexeme_merge m on m.source_id = uw.lexeme_id
+        on conflict do nothing
+        """
+    )
+    conn.execute(
+        """
+        insert into lexicon.usage_warning_source (usage_warning_id, source_file_id)
+        select distinct target.id, ownership.source_file_id
+        from lexicon.usage_warning source
+        join lexicon.usage_warning_source ownership
+          on ownership.usage_warning_id = source.id
+        join tmp_lexeme_merge m on m.source_id = source.lexeme_id
+        join lexicon.usage_warning target
+          on target.lexeme_id = m.target_id
+         and target.sense_id is not distinct from source.sense_id
+         and target.warning_fi is not distinct from source.warning_fi
+         and target.warning_en is not distinct from source.warning_en
+         and target.warning_kind = source.warning_kind
+        on conflict do nothing
+        """
+    )
+    conn.execute(
+        """
+        delete from lexicon.usage_warning
+        where lexeme_id in (select source_id from tmp_lexeme_merge)
         """
     )
     conn.execute(
@@ -196,25 +270,57 @@ def _merge_no_sense_lexemes_bulk(conn, merge_pairs: list[tuple[int, int]]) -> No
     )
     conn.execute(
         """
+        update lexicon.lexical_relation r
+        set source_lexeme_id = m.target_id
+        from tmp_lexeme_merge m
+        where r.source_lexeme_id = m.source_id
+        """
+    )
+    conn.execute(
+        """
+        update lexicon.lexical_relation r
+        set target_lexeme_id = m.target_id
+        from tmp_lexeme_merge m
+        where r.target_lexeme_id = m.source_id
+        """
+    )
+    conn.execute(
+        """
+        with affected_derivations as (
+            select id, parent_lexeme_id, child_lexeme_id, relation_type, note
+            from lexicon.derivation_relation
+            where parent_lexeme_id in (select source_id from tmp_lexeme_merge)
+            union
+            select id, parent_lexeme_id, child_lexeme_id, relation_type, note
+            from lexicon.derivation_relation
+            where child_lexeme_id in (select source_id from tmp_lexeme_merge)
+        )
         insert into lexicon.derivation_relation (parent_lexeme_id, child_lexeme_id, relation_type, note)
         select distinct
             coalesce(parent_map.target_id, d.parent_lexeme_id),
             coalesce(child_map.target_id, d.child_lexeme_id),
             d.relation_type,
             d.note
-        from lexicon.derivation_relation d
+        from affected_derivations d
         left join tmp_lexeme_merge parent_map on parent_map.source_id = d.parent_lexeme_id
         left join tmp_lexeme_merge child_map on child_map.source_id = d.child_lexeme_id
-        where parent_map.source_id is not null
-           or child_map.source_id is not null
         on conflict do nothing
         """
     )
     conn.execute(
         """
+        with affected_derivations as (
+            select id, parent_lexeme_id, child_lexeme_id, relation_type, note
+            from lexicon.derivation_relation
+            where parent_lexeme_id in (select source_id from tmp_lexeme_merge)
+            union
+            select id, parent_lexeme_id, child_lexeme_id, relation_type, note
+            from lexicon.derivation_relation
+            where child_lexeme_id in (select source_id from tmp_lexeme_merge)
+        )
         insert into lexicon.derivation_relation_source (relation_id, source_file_id)
         select distinct target.id, ownership.source_file_id
-        from lexicon.derivation_relation source
+        from affected_derivations source
         join lexicon.derivation_relation_source ownership
           on ownership.relation_id = source.id
         left join tmp_lexeme_merge parent_map on parent_map.source_id = source.parent_lexeme_id
@@ -224,25 +330,25 @@ def _merge_no_sense_lexemes_bulk(conn, merge_pairs: list[tuple[int, int]]) -> No
          and target.child_lexeme_id = coalesce(child_map.target_id, source.child_lexeme_id)
          and target.relation_type = source.relation_type
          and target.note is not distinct from source.note
-        where parent_map.source_id is not null
-           or child_map.source_id is not null
         on conflict do nothing
         """
     )
-    conn.execute("delete from lexicon.form where lexeme_id in (select source_id from tmp_lexeme_merge)")
-    conn.execute("delete from lexicon.form_analysis where lexeme_id in (select source_id from tmp_lexeme_merge)")
-    conn.execute("delete from lexicon.pronunciation where lexeme_id in (select source_id from tmp_lexeme_merge)")
     conn.execute(
-        """
-        delete from lexicon.derivation_relation
-        where parent_lexeme_id in (select source_id from tmp_lexeme_merge)
-           or child_lexeme_id in (select source_id from tmp_lexeme_merge)
-        """
+        "delete from lexicon.form where lexeme_id in (select source_id from tmp_lexeme_merge)"
     )
     conn.execute(
-        """
-        delete from lexicon.lexeme_topic
-        where lexeme_id in (select source_id from tmp_lexeme_merge)
-        """
+        "delete from lexicon.form_analysis where lexeme_id in (select source_id from tmp_lexeme_merge)"
+    )
+    conn.execute(
+        "delete from lexicon.pronunciation where lexeme_id in (select source_id from tmp_lexeme_merge)"
+    )
+    conn.execute(
+        "delete from lexicon.derivation_relation where parent_lexeme_id in (select source_id from tmp_lexeme_merge)"
+    )
+    conn.execute(
+        "delete from lexicon.derivation_relation where child_lexeme_id in (select source_id from tmp_lexeme_merge)"
+    )
+    conn.execute(
+        "delete from lexicon.lexeme_topic where lexeme_id in (select source_id from tmp_lexeme_merge)"
     )
     _delete_lexeme_ids_in_batches(conn, source_ids)

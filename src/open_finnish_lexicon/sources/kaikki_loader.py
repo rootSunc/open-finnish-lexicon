@@ -358,7 +358,10 @@ def _kaikki_primary_form_items(entry: dict) -> list[object]:
         )
         block = raw_forms[start:end]
         for item in block:
-            if not isinstance(item, dict) or item.get("form") != lemma:
+            raw_item_form = item.get("form") if isinstance(item, dict) else None
+            if not isinstance(raw_item_form, str) or _fold_apostrophes(
+                raw_item_form.strip()
+            ) != _fold_apostrophes(lemma):
                 continue
             tags = {
                 str(tag).strip().casefold()
@@ -371,6 +374,14 @@ def _kaikki_primary_form_items(entry: dict) -> list[object]:
             ):
                 return block
     return raw_forms
+
+
+def _fold_apostrophes(value: str) -> str:
+    return (
+        unicodedata.normalize("NFC", value)
+        .replace("’", "'")
+        .replace("ʼ", "'")
+    )
 
 
 def _kaikki_form_candidates(entry: dict) -> list[tuple[str, set[str]]]:
@@ -418,6 +429,84 @@ def _kaikki_form_candidates(entry: dict) -> list[tuple[str, set[str]]]:
             continue
         candidates.append((surface, tags))
     return candidates
+
+
+_FINNISH_VOWELS = frozenset("aeiouyäö")
+_FINNISH_DIPHTHONGS = frozenset(
+    {
+        "ai",
+        "ei",
+        "oi",
+        "ui",
+        "yi",
+        "äi",
+        "öi",
+        "au",
+        "eu",
+        "iu",
+        "ou",
+        "ey",
+        "iy",
+        "äy",
+        "öy",
+        "ie",
+        "uo",
+        "yö",
+    }
+)
+_SYLLABIFIABLE_WORD_RE = re.compile(r"^[A-Za-zÅÄÖåäö]+(?:-[A-Za-zÅÄÖåäö]+)*$")
+
+
+def _syllabify_segment(segment: str) -> str:
+    if len(segment) <= 2:
+        return segment
+    syllables: list[list[str]] = []
+    current: list[str] = []
+    vowel_cluster = ""
+
+    for idx, ch in enumerate(segment):
+        low = ch.lower()
+        is_vowel = low in _FINNISH_VOWELS
+        next_is_vowel = (
+            idx + 1 < len(segment) and segment[idx + 1].lower() in _FINNISH_VOWELS
+        )
+        if not is_vowel:
+            if vowel_cluster and next_is_vowel:
+                syllables.append(current)
+                current = [ch]
+                vowel_cluster = ""
+            else:
+                current.append(ch)
+                if vowel_cluster:
+                    # Consonant codas close the vowel cluster; any later vowel starts a new syllable.
+                    vowel_cluster = "__closed__"
+        else:
+            if not vowel_cluster:
+                current.append(ch)
+                vowel_cluster = low
+            elif (
+                len(vowel_cluster) == 1
+                and vowel_cluster != "__closed__"
+                and (vowel_cluster == low or (vowel_cluster + low) in _FINNISH_DIPHTHONGS)
+            ):
+                current.append(ch)
+                vowel_cluster = vowel_cluster + low
+            else:
+                syllables.append(current)
+                current = [ch]
+                vowel_cluster = low
+
+    if current:
+        syllables.append(current)
+    return "·".join("".join(part) for part in syllables if part)
+
+
+def syllabify_finnish_word(word: str) -> str | None:
+    cleaned = word.strip()
+    if not cleaned or not _SYLLABIFIABLE_WORD_RE.fullmatch(cleaned):
+        return None
+    parts = cleaned.split("-")
+    return "-".join(_syllabify_segment(part) for part in parts)
 
 
 def _kaikki_source_class(raw_forms: list[object]) -> str | None:
@@ -557,27 +646,29 @@ def _unlabelled_possessive_forms(
     # The Wiktionary table repeats one possessive cell under both singular
     # and plural (and under accusative+nominative combinations).  Number is
     # therefore not a reliable family key for this cleanup.
+    lemma_folded = _fold_apostrophes(lemma) if isinstance(lemma, str) and lemma else None
     surfaces_by_family: dict[frozenset[str], set[str]] = {}
     surfaces_by_stem: dict[tuple[frozenset[str], str], set[str]] = {}
     for surface, tags in candidates:
         family_key = frozenset(tags - {"singular", "plural"})
-        surfaces_by_family.setdefault(family_key, set()).add(surface)
+        surfaces_by_family.setdefault(family_key, set()).add(_fold_apostrophes(surface))
         for suffix in _UNLABELLED_POSSESSIVE_SUFFIXES:
             if not surface.endswith(suffix) or len(surface) <= len(suffix) + 1:
                 continue
             stem = surface[: -len(suffix)]
+            stem_folded = _fold_apostrophes(stem)
             # A base illative such as ``herraan`` also ends in ``-aan``. It
             # is not part of a possessive family when the stripped stem is
             # the lemma itself; possessive case forms have an additional
             # case stem (``herrassaan``, ``herrallaan`` ...).
-            if suffix in {"aan", "ään"} and lemma and stem == lemma:
+            if suffix in {"aan", "ään"} and lemma_folded and stem_folded == lemma_folded:
                 continue
             # The ordinary Finnish comitative plural often ends in ``-een``
             # (``herroineen``), so that ending is ambiguous with the
             # possessive allomorph in other case cells.
             if suffix == "een" and "comitative" in family_key:
                 continue
-            surfaces_by_stem.setdefault((family_key, stem), set()).add(surface)
+            surfaces_by_stem.setdefault((family_key, stem_folded), set()).add(surface)
 
     possessive_forms = {
         (family_key, surface)
@@ -596,7 +687,7 @@ def _unlabelled_possessive_forms(
             if not surface.endswith(suffix):
                 continue
             stem = surface[: -len(suffix)]
-            if stem in surfaces_by_family.get(family_key, set()):
+            if _fold_apostrophes(stem) in surfaces_by_family.get(family_key, set()):
                 possessive_forms.add((family_key, surface))
     return possessive_forms
 
@@ -683,10 +774,23 @@ def _normalize_kaikki_entry(entry: object) -> dict | None:
 def has_kaikki_projection_data(entry: object) -> bool:
     if not isinstance(entry, dict):
         return False
+    raw_forms = entry.get("forms")
+    has_precleaned_forms = bool(
+        isinstance(raw_forms, list)
+        and any(
+            isinstance(item, dict)
+            and isinstance(item.get("form"), str)
+            and item["form"].strip()
+            and isinstance(item.get("features"), dict)
+            and bool(item["features"])
+            for item in raw_forms
+        )
+    )
     if (
         _has_usable_sound(entry.get("sounds"))
         or _has_text(entry.get("etymology_text"))
         or _has_usable_derived(entry.get("derived"))
+        or has_precleaned_forms
         or bool(_clean_kaikki_forms(entry))
     ):
         return True
@@ -699,12 +803,114 @@ def has_kaikki_projection_data(entry: object) -> bool:
     return False
 
 
+_KAIKKI_RELATION_FIELDS: tuple[tuple[str, str], ...] = (
+    ("synonyms", "synonym"),
+    ("antonyms", "antonym"),
+    ("hypernyms", "hypernym"),
+    ("hyponyms", "hyponym"),
+)
+
+
+def _extract_kaikki_syllabification(entry: dict) -> str | None:
+    existing = entry.get("syllabification")
+    if isinstance(existing, str) and existing.strip():
+        return existing.strip()
+    hyphenations = entry.get("hyphenations")
+    if isinstance(hyphenations, list):
+        for item in hyphenations:
+            if isinstance(item, dict) and isinstance(item.get("parts"), list):
+                parts = [str(p).strip() for p in item["parts"] if isinstance(p, str) and p.strip()]
+                if parts:
+                    return "·".join(parts)
+    sounds = entry.get("sounds")
+    if isinstance(sounds, list):
+        for sound in sounds:
+            if not isinstance(sound, dict):
+                continue
+            hyph = sound.get("hyphenation")
+            if isinstance(hyph, str) and hyph.strip():
+                return hyph.strip()
+            if isinstance(hyph, list):
+                parts = [str(p).strip() for p in hyph if isinstance(p, str) and p.strip()]
+                if parts:
+                    return "·".join(parts)
+    word = entry.get("word")
+    return syllabify_finnish_word(word) if isinstance(word, str) else None
+
+
+def _extract_kaikki_relations(entry: dict) -> list[dict[str, str]]:
+    seen: set[tuple[str, str]] = set()
+    relations: list[dict[str, str]] = []
+    lemma = str(entry.get("word", "")).strip()
+    existing_rels = entry.get("relations")
+    if isinstance(existing_rels, list):
+        for item in existing_rels:
+            if not isinstance(item, dict):
+                continue
+            word_val = item.get("word")
+            type_val = item.get("type")
+            if isinstance(word_val, str) and isinstance(type_val, str):
+                cleaned_word = word_val.strip()
+                cleaned_type = type_val.strip()
+                if cleaned_word and cleaned_type and cleaned_word != lemma:
+                    key = (cleaned_word, cleaned_type)
+                    if key not in seen:
+                        seen.add(key)
+                        relations.append({"word": cleaned_word, "type": cleaned_type})
+
+    def _collect(container: dict) -> None:
+        for field_name, rel_type in _KAIKKI_RELATION_FIELDS:
+            items = container.get(field_name)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                target = item.get("word") if isinstance(item, dict) else None
+                if not isinstance(target, str):
+                    continue
+                cleaned = target.strip()
+                if not cleaned or cleaned == lemma:
+                    continue
+                key = (cleaned, rel_type)
+                if key not in seen:
+                    seen.add(key)
+                    relations.append({"word": cleaned, "type": rel_type})
+
+    _collect(entry)
+    for sense in entry.get("senses", []):
+        if isinstance(sense, dict):
+            _collect(sense)
+    return relations
+
+
 def compact_kaikki_entry(entry: dict) -> dict:
-    compact = {
-        "word": entry["word"],
-        "pos": normalize_part_of_speech(entry["pos"]),
+    raw_forms = entry.get("forms")
+    if (
+        isinstance(raw_forms, list)
+        and raw_forms
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("form"), str)
+            and isinstance(item.get("features"), dict)
+            for item in raw_forms
+        )
+    ):
+        cleaned_forms = [
+            {
+                "form": item["form"].strip(),
+                "features": dict(item["features"]),
+                "tags": list(item.get("tags", [])) if isinstance(item.get("tags"), list) else [],
+            }
+            for item in raw_forms
+            if item["form"].strip()
+        ]
+    else:
+        cleaned_forms = _clean_kaikki_forms(entry)
+
+    compact: dict[str, object] = {
+        "word": str(entry["word"]).strip(),
+        "pos": normalize_part_of_speech(str(entry["pos"])),
         "senses": [],
-        "forms": _clean_kaikki_forms(entry),
+        "forms": cleaned_forms,
         "derived": [
             {"word": item["word"]}
             for item in entry.get("derived", [])
@@ -712,24 +918,47 @@ def compact_kaikki_entry(entry: dict) -> dict:
         ],
     }
 
+    syllabification = _extract_kaikki_syllabification(entry)
+    if syllabification:
+        compact["syllabification"] = syllabification
+
+    relations = _extract_kaikki_relations(entry)
+    if relations:
+        compact["relations"] = relations
+
     sounds = entry.get("sounds")
     if isinstance(sounds, list):
+        compact_sounds: list[dict[str, str]] = []
+        seen_ipas: set[str] = set()
         for sound in sounds:
             if not isinstance(sound, dict):
                 continue
             ipa = sound.get("ipa")
             if isinstance(ipa, str) and ipa.strip():
-                compact["sounds"] = [{"ipa": ipa.strip()}]
-                break
+                cleaned_ipa = ipa.strip()
+                has_variant_context = bool(
+                    cleaned_ipa.startswith("[")
+                    or sound.get("tags")
+                    or sound.get("raw_tags")
+                    or sound.get("note")
+                )
+                if compact_sounds and not has_variant_context:
+                    continue
+                if cleaned_ipa not in seen_ipas:
+                    seen_ipas.add(cleaned_ipa)
+                    compact_sounds.append({"ipa": cleaned_ipa})
+        if compact_sounds:
+            compact["sounds"] = compact_sounds
 
     etymology_text = entry.get("etymology_text")
-    if _has_text(etymology_text):
+    if isinstance(etymology_text, str) and etymology_text.strip():
         compact["etymology_text"] = etymology_text.strip()
 
+    compact_senses: list[dict[str, object]] = []
     for sense in entry.get("senses", []):
         if not isinstance(sense, dict) or not _has_text(sense.get("id")):
             continue
-        compact_sense = {
+        compact_sense: dict[str, object] = {
             "id": sense["id"],
             "glosses": _clean_string_list(sense.get("glosses")),
             "tags": _clean_string_list(sense.get("tags")),
@@ -747,14 +976,20 @@ def compact_kaikki_entry(entry: dict) -> dict:
         examples = _clean_kaikki_examples(sense.get("examples"))
         if examples:
             compact_sense["examples"] = examples
-        compact["senses"].append(compact_sense)
+        compact_senses.append(compact_sense)
+    compact["senses"] = compact_senses
 
     return compact
 
 
 def read_kaikki_entries(
-    input_path: Path, *, include_non_projection_entries: bool = False
+    input_path: Path,
+    *,
+    include_non_projection_entries: bool = False,
+    reject_corrupt_stream: bool = False,
 ) -> Iterable[dict]:
+    valid_lines = 0
+    corrupt_lines = 0
     with _open_kaikki_input(input_path) as handle:
         for line in handle:
             if not line.strip():
@@ -762,7 +997,9 @@ def read_kaikki_entries(
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
+                corrupt_lines += 1
                 continue
+            valid_lines += 1
             entry = _normalize_kaikki_entry(entry)
             if entry is None:
                 continue
@@ -771,3 +1008,8 @@ def read_kaikki_entries(
             if not include_non_projection_entries and not has_kaikki_projection_data(entry):
                 continue
             yield entry
+    if reject_corrupt_stream and corrupt_lines > 100 and corrupt_lines > valid_lines * 0.05:
+        raise ValueError(
+            f"Kaikki input {input_path} appears corrupted: "
+            f"{corrupt_lines} malformed JSON lines vs {valid_lines} valid lines"
+        )

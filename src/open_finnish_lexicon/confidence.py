@@ -16,7 +16,12 @@ def normalize_confidence_score(raw: object, *, default: float = 0.0) -> float:
     if raw is None or raw == "":
         return default
 
-    value = float(raw)
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+    elif isinstance(raw, str):
+        value = float(raw)
+    else:
+        value = float(str(raw))
     if not math.isfinite(value):
         raise ValueError(f"confidence score must be finite, got {raw!r}")
 

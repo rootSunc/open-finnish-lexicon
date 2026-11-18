@@ -3,7 +3,6 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
 import unicodedata
 
 from collections.abc import Sequence
@@ -23,7 +22,7 @@ class OmorfiRow:
     confidence: float = 1.0
 
 
-GeneratedOmorfiRow: TypeAlias = tuple[int, OmorfiRow]
+type GeneratedOmorfiRow = tuple[int, OmorfiRow]
 
 OMORFI_CASES = (
     "NOM",
@@ -126,7 +125,7 @@ def read_omorfi_rows(input_path: Path) -> list[OmorfiRow]:
 
 
 def analyse_omorfi_model_rows(input_path: Path, candidate_tokens: list[str]):
-    from omorfi.omorfi import Omorfi
+    from omorfi.omorfi import Omorfi  # ty: ignore[import-not-found]
 
     omorfi = Omorfi()
     omorfi.load_analyser(str(input_path))
@@ -222,7 +221,7 @@ def generate_omorfi_paradigm_rows(
     if model_paths is None:
         return []
 
-    from omorfi.omorfi import Omorfi
+    from omorfi.omorfi import Omorfi  # ty: ignore[import-not-found]
 
     generator_path, analyser_path = model_paths
     omorfi = Omorfi()

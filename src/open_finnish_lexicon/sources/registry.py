@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+
+import psycopg
 
 from open_finnish_lexicon.config import get_pipeline_settings
 from open_finnish_lexicon.db import connect, connection_scope
@@ -20,15 +24,18 @@ from open_finnish_lexicon.sources.omorfi_project import project_omorfi_rows
 from open_finnish_lexicon.sources.omorfi_stage import stage_omorfi_rows
 from open_finnish_lexicon.sources.tatoeba_project import project_tatoeba_rows
 from open_finnish_lexicon.sources.tatoeba_stage import stage_tatoeba_rows
-from open_finnish_lexicon.sources.wiktionary_zh_project import project_wiktionary_zh_rows
-from open_finnish_lexicon.sources.wiktionary_zh_stage import stage_wiktionary_zh_rows
 from open_finnish_lexicon.sources.warehouse import (
+    active_source_file_for_name,
     clear_retired_source_registry_documents_in_batches,
     finalize_source_registry_snapshot,
+    source_file_id_for_path,
 )
+from open_finnish_lexicon.sources.wiktionary_zh_project import project_wiktionary_zh_rows
+from open_finnish_lexicon.sources.wiktionary_zh_stage import stage_wiktionary_zh_rows
 
-StageFn = Callable[..., int]
-ProjectFn = Callable[..., int]
+
+type StageFn = Callable[..., int]
+type ProjectFn = Callable[..., int]
 
 
 @dataclass(frozen=True)
@@ -51,7 +58,7 @@ SOURCE_PIPELINES = frozenset(
 
 
 def get_source_pipeline(source_name: str) -> SourcePipeline:
-    pipelines = {
+    pipelines: dict[str, SourcePipeline] = {
         "omorfi": SourcePipeline(stage=stage_omorfi_rows, project=project_omorfi_rows),
         "kaikki": SourcePipeline(stage=stage_kaikki_entries, project=project_kaikki_entries),
         "finnwordnet": SourcePipeline(
@@ -77,11 +84,13 @@ FIXTURE_INPUTS: tuple[tuple[str, Path], ...] = (
     ("dbnary_zh", Path("tests/fixtures/dbnary-zh-exolex.ttl")),
 )
 
+# Run Tatoeba and Frequency before Omorfi so Omorfi's candidate token harvester
+# sees all example and frequency surface tokens on the very first build.
 SYNC_SOURCE_ORDER = (
     "kaikki",
-    "omorfi",
     "tatoeba",
     "frequency",
+    "omorfi",
     "finnwordnet",
     "dbnary_zh",
     "wiktionary_zh",
@@ -98,14 +107,7 @@ def _is_fixture_input_path(input_path: Path) -> bool:
 
 
 def _assert_manual_ingest_profile(input_path: Path) -> None:
-    """Keep fixture data out of a real-profile database.
-
-    Manual ingest is intentionally still available for real source snapshots,
-    but a common typo is running an ``ingest-*`` command with a test fixture
-    while OFL_PROFILE is real.  That can replace a source's
-    provenance and, for full-replacement sources such as frequency, its live
-    data.  Fail before the stage function opens a write transaction.
-    """
+    """Keep fixture data out of a real-profile database."""
 
     settings = get_pipeline_settings()
     if settings.data_profile == "real" and _is_fixture_input_path(input_path):
@@ -113,6 +115,24 @@ def _assert_manual_ingest_profile(input_path: Path) -> None:
             "manual ingest refuses fixture input while OFL_PROFILE=real; "
             "use OFL_PROFILE=fixture for test data"
         )
+
+
+def cleanup_retired_source_documents(source_name: str) -> int:
+    """Refresh dependent Chinese selections if needed, then purge retired warehouse rows."""
+
+    if source_name in CHINESE_CANDIDATE_SOURCES:
+        select_zh_glosses()
+        rebuild_chinese_glosses()
+    with connect() as cleanup_conn:
+        row = cleanup_conn.execute(
+            "select id from warehouse.source_registry where name = %s",
+            (source_name,),
+        ).fetchone()
+    if row is None:
+        return 0
+    return clear_retired_source_registry_documents_in_batches(
+        source_registry_id=int(row[0]),
+    )
 
 
 def run_manual_ingest(source_name: str, input_path: Path) -> None:
@@ -137,19 +157,8 @@ def run_manual_ingest(source_name: str, input_path: Path) -> None:
         )
         conn.commit()
 
-    # Publish the replacement snapshot before deleting retired warehouse rows.
-    # Large real-world sources can have millions of dependent claims; cleanup
-    # must not keep a valid new snapshot invisible for the duration of that
-    # maintenance transaction.
     try:
-        with connect() as cleanup_conn:
-            source_registry_id = cleanup_conn.execute(
-                "select id from warehouse.source_registry where name = %s",
-                (source_name,),
-            ).fetchone()[0]
-        clear_retired_source_registry_documents_in_batches(
-            source_registry_id=source_registry_id,
-        )
+        cleanup_retired_source_documents(source_name)
     except Exception as exc:
         print(
             f"[{source_name}] retired warehouse cleanup deferred: {exc}",
@@ -164,59 +173,53 @@ def finalize_source_snapshot(
     *,
     source_file_id: int | None = None,
     cleanup_superseded_documents: bool = True,
-    connection=None,
+    connection: psycopg.Connection | None = None,
 ) -> None:
     """Activate the successfully projected file and retire older release paths."""
 
     owns_connection = connection is None
     with connection_scope(connection) as conn:
-        if source_file_id is None:
-            row = conn.execute(
-                """
-                select sf.id, sf.source_registry_id
-                from warehouse.source_file sf
-                join warehouse.source_registry sr on sr.id = sf.source_registry_id
-                where sr.name = %s
-                  and sf.local_path = %s
-                  and sf.snapshot_state = 'pending'
-                order by sf.imported_at desc, sf.id desc
-                limit 1
-                """,
-                (source_name, str(input_path)),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                """
-                select sf.id, sf.source_registry_id
-                from warehouse.source_file sf
-                join warehouse.source_registry sr on sr.id = sf.source_registry_id
-                where sr.name = %s
-                  and sf.local_path = %s
-                  and sf.id = %s
-                  and sf.snapshot_state = 'pending'
-                """,
-                (source_name, str(input_path), source_file_id),
-            ).fetchone()
-        if row is None:
+        resolved_file_id = source_file_id_for_path(
+            conn,
+            source_name=source_name,
+            local_path=input_path,
+            source_file_id=source_file_id,
+        )
+        registry_row = conn.execute(
+            "select source_registry_id from warehouse.source_file where id = %s",
+            (resolved_file_id,),
+        ).fetchone()
+        if registry_row is None:
             raise RuntimeError(f"source file is not staged: {source_name} {input_path}")
-        source_file_id, source_registry_id = row
         finalize_source_registry_snapshot(
             conn,
-            source_registry_id=source_registry_id,
-            active_source_file_id=source_file_id,
+            source_registry_id=int(registry_row[0]),
+            active_source_file_id=resolved_file_id,
             cleanup_superseded_documents=cleanup_superseded_documents,
         )
         if owns_connection:
             conn.commit()
 
 
-def refresh_runtime_views(*, refresh_forms: bool = True) -> None:
-    """Rebuild derived tables after a source sync.
+def reproject_active_chinese_sources() -> None:
+    """Re-align active Chinese candidate sources after lexeme reconciliation."""
 
-    ``refresh_forms`` re-runs rule-based form validation, which scans every
-    ``lexicon.form`` row. Skip it when only examples or glosses changed.
-    """
+    for source_name in ("dbnary_zh", "wiktionary_zh"):
+        with connect() as conn:
+            active = active_source_file_for_name(conn, source_name=source_name)
+            if active is None:
+                continue
+            source_file_id, local_path = active
+            pipeline = get_source_pipeline(source_name)
+            pipeline.project(local_path, source_file_id=source_file_id, connection=conn)
+            conn.commit()
 
+
+def refresh_runtime_views(*, refresh_forms: bool = True, reproject_zh: bool = False) -> None:
+    """Rebuild derived tables after a source sync."""
+
+    if reproject_zh:
+        reproject_active_chinese_sources()
     rebuild_collocations()
     select_zh_glosses()
     rebuild_chinese_glosses()
