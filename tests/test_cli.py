@@ -66,3 +66,51 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         archive.assert_called_once_with(older_than_hours=12)
+
+    def test_version_flag_returns_zero(self):
+        with patch("builtins.print") as print_mock:
+            exit_code = main(["--version"])
+        self.assertEqual(exit_code, 0)
+        output = "\n".join(str(args[0]) for args, _kwargs in print_mock.call_args_list)
+        self.assertIn("open-finnish-lexicon", output)
+
+    def test_subcommand_help_returns_zero_instead_of_error(self):
+        for cmd in (["build", "--help"], ["export-sqlite", "-h"], ["sync-all", "--help"]):
+            with patch("builtins.print") as print_mock:
+                exit_code = main(cmd)
+            self.assertEqual(exit_code, 0, msg=f"{cmd} should return 0")
+            self.assertTrue(print_mock.called)
+
+    def test_equals_syntax_and_extended_options_parse_cleanly(self):
+        with patch("open_finnish_lexicon.cli.commands.ingest.sync_all") as sync:
+            sync.return_value = 0
+            exit_code = main(
+                [
+                    "sync-all",
+                    "--manifest=src/open_finnish_lexicon/source_releases.toml",
+                    "--sources=kaikki,frequency",
+                    "--exclude-sources=tatoeba",
+                    "--force-download",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        sync.assert_called_once_with(
+            manifest_path=Path("src/open_finnish_lexicon/source_releases.toml"),
+            refresh=True,
+            sources=("kaikki", "frequency"),
+            exclude_sources=("tatoeba",),
+            force_download=True,
+        )
+
+    def test_export_overwrite_and_pure_jsonl_flags(self):
+        with patch("open_finnish_lexicon.cli.commands.export.export_jsonl") as exp:
+            exp.return_value = 42
+            exit_code = main(
+                ["export-jsonl", "--overwrite", "--pure-jsonl", "--output=dist/out.jsonl"]
+            )
+        self.assertEqual(exit_code, 0)
+        exp.assert_called_once_with(
+            Path("dist/out.jsonl"),
+            overwrite=True,
+            include_sources_header=False,
+        )

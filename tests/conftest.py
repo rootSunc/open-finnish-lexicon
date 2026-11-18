@@ -1,13 +1,19 @@
-"""Point every test at the throwaway database and apply the schema once."""
+"""Point DB-backed tests at the throwaway database while allowing pure-Python
+unit tests to run without PostgreSQL."""
+
+from __future__ import annotations
 
 import os
 
+import psycopg
 import pytest
 
 from support import get_test_database_url
 
 os.environ["OFL_PROFILE"] = "fixture"
 get_test_database_url()
+
+_REAL_PSYCOPG_CONNECT = psycopg.connect
 
 
 @pytest.fixture(autouse=True)
@@ -20,14 +26,24 @@ def _fresh_settings():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _schema():
-    import psycopg
-
+def _db_session_setup():
     from open_finnish_lexicon.cli.ingest import init_db
 
     try:
-        with psycopg.connect(get_test_database_url(), connect_timeout=3):
+        with _REAL_PSYCOPG_CONNECT(get_test_database_url(), connect_timeout=2):
             pass
     except psycopg.OperationalError:
-        pytest.skip("test database unavailable; run scripts/test-db.sh", allow_module_level=True)
+        mp = pytest.MonkeyPatch()
+
+        def _skip_on_db_connect(*_args, **_kwargs):
+            pytest.skip("test database unavailable; run scripts/test-db.sh")
+
+        mp.setattr(psycopg, "connect", _skip_on_db_connect)
+        try:
+            yield False
+        finally:
+            mp.undo()
+        return
+
     init_db()
+    yield True

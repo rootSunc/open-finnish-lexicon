@@ -68,15 +68,17 @@ licenses, and the time each step took.
 | `--manifest <path>` | Use another `source_releases.toml` |
 | `--skip-sync` | Re-export from the existing database without downloading |
 | `--no-report` | Do not write the report file |
+| `--overwrite` | Atomically replace an existing output (and `.report.json`) file |
+| `--sources <s1,s2>` | Sync only the selected sources (e.g. `kaikki,frequency`) |
+| `--exclude-sources <s1,s2>` | Skip specific sources during sync (e.g. `tatoeba`) |
+| `--force-download` | Re-download rolling upstream archives even if cached locally |
+| `--pure-jsonl` | Omit the leading `_sources` metadata row when exporting `.jsonl` |
 
-A full build downloads about 2 GB into `OFL_DATA_DIR` (default `./data`),
-which grows to about 7 GB once unpacked; the PostgreSQL database takes about
-6 GB more. On a laptop it takes about 30 minutes (sync 15, reconcile 14,
-refresh 2, export under 1). It refuses to overwrite an existing output file.
-
-A November 2026 build produced 262,543 lexemes, 312,297 senses, 4.8 million
-inflected forms and 168,000 example sentences; the SQLite export is about 950 MB.
-The Chinese layer is small: 510 senses have a Chinese gloss.
+Exports write to a temporary `.part` file and atomically rename on completion.
+SQLite exports include foreign-key indexes, a `v_lexeme_summary` convenience
+view, and a `lexeme_fts` FTS5 full-text index; see
+[`docs/EXPORT_SCHEMA.md`](docs/EXPORT_SCHEMA.md) for table definitions and
+example queries.
 
 ### Step by step
 

@@ -756,7 +756,7 @@ class LexemeNormalizationTests(unittest.TestCase):
                 """,
                 (rich_lexeme_id, f"{token}-sense", "to remain", 1),
             )
-            for shell_id, score in ((first_shell_id, 0.4), (second_shell_id, 0.9)):
+            for shell_id, _score in ((first_shell_id, 0.4), (second_shell_id, 0.9)):
                 conn.execute(
                     """
                     insert into lexicon.form (lexeme_id, surface_form, normalized_form, form_kind, features)

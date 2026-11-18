@@ -1,7 +1,8 @@
 """Export the lexicon and Chinese layer to SQLite or JSON Lines.
 
-Both formats carry a ``sources`` record with each upstream source's version
-and license, so the exported file keeps its attribution.
+Both formats carry upstream source versions and licenses so the exported file
+keeps its attribution, and both write via a temporary ``.part`` file followed
+by an atomic rename so an interrupted export never leaves a half-written output.
 """
 
 from __future__ import annotations
@@ -9,119 +10,250 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sqlite3
+from typing import LiteralString
 
 from open_finnish_lexicon.db import connect
 
 # (sqlite table, column definitions, postgres select returning the same columns)
-SQLITE_TABLES: tuple[tuple[str, str, str], ...] = (
+SQLITE_TABLES: tuple[tuple[str, str, LiteralString], ...] = (
     (
         "lexeme",
         "id integer primary key, lemma text not null, display_lemma text not null, "
-        "part_of_speech text not null, frequency_rank integer",
-        "select id, lemma, display_lemma, part_of_speech, frequency_rank from lexicon.lexeme",
+        "part_of_speech text not null, frequency_rank integer, is_lemma integer not null default 1",
+        "select id, lemma, display_lemma, part_of_speech, frequency_rank, "
+        "case when is_lemma then 1 else 0 end from lexicon.lexeme order by id",
     ),
     (
         "sense",
         "id integer primary key, lexeme_id integer not null references lexeme(id), "
         "sense_key text, gloss_fi text, gloss_en text, labels text, sort_order integer",
         "select id, lexeme_id, sense_key, gloss_fi, gloss_en, array_to_json(labels)::text, sort_order "
-        "from lexicon.lexeme_sense",
+        "from lexicon.lexeme_sense order by id",
     ),
     (
         "form",
         "id integer primary key, lexeme_id integer not null references lexeme(id), "
         "surface_form text not null, form_kind text, features text, validation text",
         "select f.id, f.lexeme_id, f.surface_form, f.form_kind, f.features::text, v.verdict "
-        "from lexicon.form f left join lexicon.form_validation v on v.form_id = f.id",
+        "from lexicon.form f left join lexicon.form_validation v on v.form_id = f.id order by f.id",
     ),
     (
         "pronunciation",
         "id integer primary key, lexeme_id integer not null references lexeme(id), "
         "ipa text, syllabification text",
-        "select id, lexeme_id, ipa, syllabification from lexicon.pronunciation",
+        "select id, lexeme_id, ipa, syllabification from lexicon.pronunciation order by id",
     ),
     (
         "example",
-        "id integer primary key, text_fi text not null, text_en text, source_label text",
-        "select id, text_fi, text_en, source_label from lexicon.example",
+        "id integer primary key, text_fi text not null, text_en text, "
+        "source_label text, attribution text",
+        "select id, text_fi, text_en, source_label, attribution from lexicon.example order by id",
     ),
     (
         "sense_example",
         "sense_id integer not null references sense(id), "
         "example_id integer not null references example(id), sort_order integer",
-        "select sense_id, example_id, sort_order from lexicon.sense_example",
+        "select sense_id, example_id, sort_order from lexicon.sense_example order by sense_id, sort_order, example_id",
     ),
     (
         "relation",
-        "source_lexeme_id integer not null, target_lexeme_id integer not null, relation_type text",
+        "source_lexeme_id integer not null references lexeme(id), "
+        "target_lexeme_id integer not null references lexeme(id), relation_type text",
         "select source_lexeme_id, target_lexeme_id, relation_type from lexicon.lexical_relation",
     ),
     (
         "derivation",
-        "parent_lexeme_id integer not null, child_lexeme_id integer not null, relation_type text",
+        "parent_lexeme_id integer not null references lexeme(id), "
+        "child_lexeme_id integer not null references lexeme(id), relation_type text",
         "select parent_lexeme_id, child_lexeme_id, relation_type from lexicon.derivation_relation",
     ),
     (
         "collocation",
-        "lexeme_id integer, sense_id integer, phrase text not null, score real",
+        "lexeme_id integer references lexeme(id), sense_id integer references sense(id), "
+        "phrase text not null, score real",
         "select lexeme_id, sense_id, phrase, score::float8 from lexicon.collocation",
     ),
     (
         "topic",
-        "lexeme_id integer not null, sense_id integer, topic_id text not null, label_en text",
-        "select t.lexeme_id, t.sense_id, t.topic_id, tx.label_en "
-        "from lexicon.lexeme_topic t join lexicon.topic_taxonomy tx on tx.id = t.topic_id",
+        "lexeme_id integer not null references lexeme(id), sense_id integer references sense(id), "
+        "topic_id text not null, label_en text, label_cn text",
+        "select t.lexeme_id, t.sense_id, t.topic_id, tx.label_en, tx.label_cn "
+        "from lexicon.lexeme_topic t join lexicon.topic_taxonomy tx on tx.id = t.topic_id "
+        "where t.status = 'active'",
+    ),
+    (
+        "grammar_note",
+        "id integer primary key, lexeme_id integer references lexeme(id), "
+        "sense_id integer references sense(id), note_fi text, note_en text, note_kind text not null",
+        "select id, lexeme_id, sense_id, note_fi, note_en, note_kind from lexicon.grammar_note order by id",
+    ),
+    (
+        "usage_warning",
+        "id integer primary key, lexeme_id integer references lexeme(id), "
+        "sense_id integer references sense(id), warning_fi text, warning_en text, warning_kind text not null",
+        "select id, lexeme_id, sense_id, warning_fi, warning_en, warning_kind from lexicon.usage_warning order by id",
     ),
     (
         "zh_gloss",
         "sense_id integer not null references sense(id), gloss_zh text not null, method text",
         "select sense_id, gloss_zh, generation_method from zh_layer.zh_gloss "
-        "where is_primary and gloss_zh is not null",
+        "where is_primary and gloss_zh is not null order by sense_id",
     ),
     (
         "zh_example_translation",
         "example_id integer not null references example(id), text_zh text not null, method text",
         "select example_id, text_zh, generation_method from zh_layer.zh_example_translation "
-        "where is_primary and btrim(text_zh) <> ''",
+        "where is_primary and is_usable and btrim(text_zh) <> '' order by example_id",
     ),
     (
         "sources",
         "name text primary key, version text, source_url text, license text",
-        "select sr.name, coalesce(sf.source_version, sr.version), coalesce(sf.source_url, sr.source_url), "
-        "sr.license from warehouse.source_registry sr left join warehouse.source_file sf "
-        "on sf.source_registry_id = sr.id and sf.snapshot_state = 'active'",
+        "select distinct on (sr.name) sr.name, coalesce(sf.source_version, sr.version), "
+        "coalesce(sf.source_url, sr.source_url), sr.license "
+        "from warehouse.source_registry sr "
+        "left join warehouse.source_file sf "
+        "on sf.source_registry_id = sr.id and sf.snapshot_state = 'active' "
+        "order by sr.name, sf.imported_at desc nulls last",
     ),
+)
+
+SQLITE_INDEXES: tuple[str, ...] = (
+    "create index idx_lexeme_lemma on lexeme (lemma)",
+    "create index idx_lexeme_lemma_nocase on lexeme (lemma collate nocase)",
+    "create index idx_lexeme_frequency on lexeme (frequency_rank) where frequency_rank is not null",
+    "create index idx_sense_lexeme on sense (lexeme_id)",
+    "create index idx_form_lexeme on form (lexeme_id)",
+    "create index idx_form_surface on form (surface_form)",
+    "create index idx_form_surface_nocase on form (surface_form collate nocase)",
+    "create index idx_pronunciation_lexeme on pronunciation (lexeme_id)",
+    "create index idx_sense_example_sense on sense_example (sense_id)",
+    "create index idx_sense_example_example on sense_example (example_id)",
+    "create index idx_relation_source on relation (source_lexeme_id)",
+    "create index idx_relation_target on relation (target_lexeme_id)",
+    "create index idx_derivation_parent on derivation (parent_lexeme_id)",
+    "create index idx_derivation_child on derivation (child_lexeme_id)",
+    "create index idx_collocation_lexeme on collocation (lexeme_id)",
+    "create index idx_collocation_sense on collocation (sense_id)",
+    "create index idx_topic_lexeme on topic (lexeme_id)",
+    "create index idx_grammar_note_lexeme on grammar_note (lexeme_id)",
+    "create index idx_grammar_note_sense on grammar_note (sense_id)",
+    "create index idx_usage_warning_sense on usage_warning (sense_id)",
+    "create index idx_zh_gloss_sense on zh_gloss (sense_id)",
+    "create index idx_zh_example_translation_example on zh_example_translation (example_id)",
 )
 
 BATCH_SIZE = 5000
 
 
-def export_sqlite(output: Path) -> dict[str, int]:
-    if output.exists():
-        raise FileExistsError(f"{output} already exists")
-    counts: dict[str, int] = {}
-    target = sqlite3.connect(output)
+def _build_sqlite_views_and_fts(target: sqlite3.Connection) -> None:
+    target.execute(
+        """
+        create view v_lexeme_summary as
+        select
+            l.id,
+            l.lemma,
+            l.display_lemma,
+            l.part_of_speech,
+            l.frequency_rank,
+            l.is_lemma,
+            (select p.ipa from pronunciation p where p.lexeme_id = l.id order by p.id limit 1) as primary_ipa,
+            (
+                select s.gloss_en
+                from sense s
+                where s.lexeme_id = l.id and s.gloss_en is not null
+                order by (case when coalesce(s.labels, '') like '%"form-of"%' then 1 else 0 end), s.sort_order, s.id
+                limit 1
+            ) as primary_gloss_en,
+            (
+                select zg.gloss_zh
+                from sense s
+                join zh_gloss zg on zg.sense_id = s.id
+                where s.lexeme_id = l.id
+                order by (case when coalesce(s.labels, '') like '%"form-of"%' then 1 else 0 end), s.sort_order, s.id
+                limit 1
+            ) as primary_gloss_zh
+        from lexeme l
+        """
+    )
     try:
+        target.execute(
+            """
+            create virtual table lexeme_fts using fts5(
+                lexeme_id unindexed,
+                lemma,
+                display_lemma,
+                part_of_speech unindexed,
+                gloss_en,
+                gloss_zh,
+                tokenize = 'unicode61 remove_diacritics 2'
+            )
+            """
+        )
+        target.execute(
+            """
+            insert into lexeme_fts (lexeme_id, lemma, display_lemma, part_of_speech, gloss_en, gloss_zh)
+            select
+                l.id,
+                l.lemma,
+                l.display_lemma,
+                l.part_of_speech,
+                coalesce((
+                    select group_concat(s.gloss_en, ' ; ')
+                    from sense s
+                    where s.lexeme_id = l.id and s.gloss_en is not null
+                ), ''),
+                coalesce((
+                    select group_concat(zg.gloss_zh, ' ； ')
+                    from sense s
+                    join zh_gloss zg on zg.sense_id = s.id
+                    where s.lexeme_id = l.id
+                ), '')
+            from lexeme l
+            """
+        )
+    except sqlite3.OperationalError:
+        # FTS5 is enabled in standard Python builds; skip gracefully if compiled without it.
+        pass
+
+
+def export_sqlite(output: Path, *, overwrite: bool = False) -> dict[str, int]:
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"{output} already exists")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output.with_name(f".{output.name}.part")
+    temp_path.unlink(missing_ok=True)
+
+    counts: dict[str, int] = {}
+    target = sqlite3.connect(temp_path)
+    try:
+        target.execute("pragma journal_mode = memory")
+        target.execute("pragma synchronous = off")
+        target.execute("pragma temp_store = memory")
         with connect() as conn:
             for table, columns, select_sql in SQLITE_TABLES:
                 target.execute(f"create table {table} ({columns})")
                 total = 0
                 with conn.cursor(name=f"export_{table}") as cursor:
+                    cursor.itersize = BATCH_SIZE
                     cursor.execute(select_sql)
-                    rows = cursor.fetchmany(BATCH_SIZE)
+                    assert cursor.description is not None
                     placeholders = ", ".join("?" * len(cursor.description))
-                    while rows:
+                    while rows := cursor.fetchmany(BATCH_SIZE):
                         target.executemany(f"insert into {table} values ({placeholders})", rows)
                         total += len(rows)
-                        rows = cursor.fetchmany(BATCH_SIZE)
                 counts[table] = total
-        target.execute("create index idx_sense_lexeme on sense (lexeme_id)")
-        target.execute("create index idx_form_lexeme on form (lexeme_id)")
-        target.execute("create index idx_form_surface on form (surface_form)")
-        target.execute("create index idx_lexeme_lemma on lexeme (lemma)")
+        for index_sql in SQLITE_INDEXES:
+            target.execute(index_sql)
+        _build_sqlite_views_and_fts(target)
+        target.execute("analyze")
         target.commit()
-    finally:
+        target.execute("pragma optimize")
         target.close()
+        temp_path.replace(output)
+    except BaseException:
+        target.close()
+        temp_path.unlink(missing_ok=True)
+        raise
     return counts
 
 
@@ -129,43 +261,131 @@ _JSONL_SQL = """
 select jsonb_build_object(
     'id', l.id,
     'lemma', l.lemma,
+    'display_lemma', l.display_lemma,
+    'is_lemma', l.is_lemma,
     'pos', l.part_of_speech,
     'frequency_rank', l.frequency_rank,
-    'ipa', (select array_agg(p.ipa order by p.id) from lexicon.pronunciation p
-            where p.lexeme_id = l.id and p.ipa is not null),
+    'ipa', (
+        select array_agg(p.ipa order by p.id)
+        from lexicon.pronunciation p
+        where p.lexeme_id = l.id and p.ipa is not null
+    ),
+    'pronunciations', coalesce((
+        select jsonb_agg(jsonb_build_object(
+            'ipa', p.ipa,
+            'syllabification', p.syllabification
+        ) order by p.id)
+        from lexicon.pronunciation p
+        where p.lexeme_id = l.id
+    ), '[]'::jsonb),
+    'etymology', (
+        select gn.note_en
+        from lexicon.grammar_note gn
+        where gn.lexeme_id = l.id and gn.sense_id is null and gn.note_kind = 'etymology'
+        order by gn.id
+        limit 1
+    ),
     'senses', coalesce((
         select jsonb_agg(jsonb_build_object(
             'id', s.id,
+            'sense_key', s.sense_key,
             'gloss_en', s.gloss_en,
             'gloss_fi', s.gloss_fi,
-            'gloss_zh', (select g.gloss_zh from zh_layer.zh_gloss g
-                         where g.sense_id = s.id and g.is_primary limit 1),
+            'gloss_zh', zg.gloss_zh,
             'labels', s.labels,
+            'notes', coalesce((
+                select jsonb_agg(gn.note_en order by gn.id)
+                from lexicon.grammar_note gn
+                where gn.sense_id = s.id and gn.note_en is not null
+            ), '[]'::jsonb),
+            'warnings', coalesce((
+                select jsonb_agg(uw.warning_en order by uw.id)
+                from lexicon.usage_warning uw
+                where uw.sense_id = s.id and uw.warning_en is not null
+            ), '[]'::jsonb),
             'examples', coalesce((
                 select jsonb_agg(jsonb_build_object(
                     'fi', e.text_fi,
                     'en', e.text_en,
-                    'zh', (select t.text_zh from zh_layer.zh_example_translation t
-                           where t.example_id = e.id and t.is_primary
-                             and btrim(t.text_zh) <> '' limit 1),
-                    'source', e.source_label
+                    'zh', zet.text_zh,
+                    'source', e.source_label,
+                    'attribution', e.attribution
                 ) order by se.sort_order, e.id)
                 from lexicon.sense_example se
                 join lexicon.example e on e.id = se.example_id
+                left join lateral (
+                    select t.text_zh
+                    from zh_layer.zh_example_translation t
+                    where t.example_id = e.id
+                      and t.is_primary
+                      and t.is_usable
+                      and btrim(t.text_zh) <> ''
+                    order by t.id
+                    limit 1
+                ) zet on true
                 where se.sense_id = s.id
             ), '[]'::jsonb)
         ) order by s.sort_order, s.id)
-        from lexicon.lexeme_sense s where s.lexeme_id = l.id
+        from lexicon.lexeme_sense s
+        left join lateral (
+            select g.gloss_zh
+            from zh_layer.zh_gloss g
+            where g.sense_id = s.id and g.is_primary
+            order by g.id desc
+            limit 1
+        ) zg on true
+        where s.lexeme_id = l.id
     ), '[]'::jsonb),
     'forms', coalesce((
         select jsonb_agg(jsonb_build_object(
             'form', f.surface_form,
+            'form_kind', f.form_kind,
             'features', f.features,
             'validation', v.verdict
         ) order by f.id)
         from lexicon.form f
         left join lexicon.form_validation v on v.form_id = f.id
         where f.lexeme_id = l.id
+    ), '[]'::jsonb),
+    'relations', coalesce((
+        select jsonb_agg(jsonb_build_object(
+            'target_lexeme_id', r.target_lexeme_id,
+            'target_lemma', tl.lemma,
+            'type', r.relation_type
+        ) order by r.relation_type, tl.lemma, r.id)
+        from lexicon.lexical_relation r
+        join lexicon.lexeme tl on tl.id = r.target_lexeme_id
+        where r.source_lexeme_id = l.id
+    ), '[]'::jsonb),
+    'derivations', coalesce((
+        select jsonb_agg(jsonb_build_object(
+            'child_lexeme_id', dr.child_lexeme_id,
+            'child_lemma', cl.lemma,
+            'type', dr.relation_type
+        ) order by cl.lemma, dr.id)
+        from lexicon.derivation_relation dr
+        join lexicon.lexeme cl on cl.id = dr.child_lexeme_id
+        where dr.parent_lexeme_id = l.id
+    ), '[]'::jsonb),
+    'collocations', coalesce((
+        select jsonb_agg(jsonb_build_object(
+            'phrase', c.phrase,
+            'sense_id', c.sense_id,
+            'score', c.score::float8
+        ) order by c.score desc, c.id)
+        from lexicon.collocation c
+        where c.lexeme_id = l.id
+    ), '[]'::jsonb),
+    'topics', coalesce((
+        select jsonb_agg(jsonb_build_object(
+            'topic_id', t.topic_id,
+            'sense_id', t.sense_id,
+            'label_en', tx.label_en,
+            'label_cn', tx.label_cn
+        ) order by t.confidence desc, t.id)
+        from lexicon.lexeme_topic t
+        join lexicon.topic_taxonomy tx on tx.id = t.topic_id
+        where t.lexeme_id = l.id and t.status = 'active'
     ), '[]'::jsonb)
 )::text
 from lexicon.lexeme l
@@ -173,24 +393,41 @@ order by l.id
 """
 
 
-def export_jsonl(output: Path) -> int:
-    """Write one lexeme per line; the first line is a ``_sources`` header."""
+def export_jsonl(
+    output: Path,
+    *,
+    overwrite: bool = False,
+    include_sources_header: bool = True,
+) -> int:
+    """Write one lexeme per line; by default the first line is a ``_sources`` header."""
 
-    if output.exists():
+    if output.exists() and not overwrite:
         raise FileExistsError(f"{output} already exists")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output.with_name(f".{output.name}.part")
+    temp_path.unlink(missing_ok=True)
+
     total = 0
-    with connect() as conn, output.open("w", encoding="utf-8") as handle:
-        sources = conn.execute(SQLITE_TABLES[-1][2]).fetchall()
-        header = {
-            "_sources": [
-                {"name": n, "version": v, "url": u, "license": lic} for n, v, u, lic in sources
-            ]
-        }
-        handle.write(json.dumps(header, ensure_ascii=False) + "\n")
-        with conn.cursor(name="export_jsonl") as cursor:
-            cursor.execute(_JSONL_SQL)
-            while rows := cursor.fetchmany(1000):
-                for (line,) in rows:
-                    handle.write(line + "\n")
-                total += len(rows)
+    try:
+        with connect() as conn, temp_path.open("w", encoding="utf-8") as handle:
+            if include_sources_header:
+                sources = conn.execute(SQLITE_TABLES[-1][2]).fetchall()
+                header = {
+                    "_sources": [
+                        {"name": n, "version": v, "url": u, "license": lic}
+                        for n, v, u, lic in sources
+                    ]
+                }
+                handle.write(json.dumps(header, ensure_ascii=False) + "\n")
+            with conn.cursor(name="export_jsonl") as cursor:
+                cursor.itersize = 2000
+                cursor.execute(_JSONL_SQL)
+                while rows := cursor.fetchmany(2000):
+                    for (line,) in rows:
+                        handle.write(line + "\n")
+                    total += len(rows)
+        temp_path.replace(output)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
     return total

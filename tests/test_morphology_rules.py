@@ -1612,30 +1612,30 @@ class GuardClauseTests(unittest.TestCase):
         )
         self.assertEqual(verdict, Verdict.UNCERTAIN)
 
-    def test_passive_voice_returns_uncertain(self):
+    def test_past_passive_voice_returns_uncertain(self):
         verdict, _ = _verify(
             "puhua",
             "verb",
-            "puhutaan",
-            {"VerbForm": "Fin", "Mood": "Ind", "Tense": "Pres", "Voice": "Pass"},
+            "puhuttiin",
+            {"VerbForm": "Fin", "Mood": "Ind", "Tense": "Past", "Voice": "Pass"},
         )
         self.assertEqual(verdict, Verdict.UNCERTAIN)
 
-    def test_past_tense_returns_uncertain(self):
+    def test_imperative_mood_returns_uncertain(self):
         verdict, _ = _verify(
             "puhua",
             "verb",
-            "puhui",
-            {"VerbForm": "Fin", "Mood": "Ind", "Tense": "Past", "Person": "3", "Number": "Sing"},
+            "puhu",
+            {"VerbForm": "Fin", "Mood": "Imp", "Person": "2", "Number": "Sing"},
         )
         self.assertEqual(verdict, Verdict.UNCERTAIN)
 
-    def test_conditional_mood_returns_uncertain(self):
+    def test_potential_mood_returns_uncertain(self):
         verdict, _ = _verify(
             "puhua",
             "verb",
-            "puhuisin",
-            {"VerbForm": "Fin", "Mood": "Cnd", "Tense": "Pres", "Person": "1", "Number": "Sing"},
+            "puhunen",
+            {"VerbForm": "Fin", "Mood": "Pot", "Tense": "Pres", "Person": "1", "Number": "Sing"},
         )
         self.assertEqual(verdict, Verdict.UNCERTAIN)
 
@@ -1791,6 +1791,137 @@ class VerbTests(unittest.TestCase):
                 )
                 self.assertEqual(verdict, Verdict.VERIFIED)
                 self.assertEqual(predicted, surface)
+
+    def test_verb_types_3_to_6_present_paradigms_are_verified(self):
+        cases = {
+            ("opiskella", "1", "Sing"): "opiskelen",
+            ("opiskella", "3", "Sing"): "opiskelee",
+            ("ajatella", "1", "Sing"): "ajattelen",
+            ("nousta", "1", "Sing"): "nousen",
+            ("kuolla", "3", "Sing"): "kuolee",
+            ("haluta", "1", "Sing"): "haluan",
+            ("haluta", "3", "Sing"): "haluaa",
+            ("avata", "1", "Sing"): "avaan",
+            ("avata", "3", "Sing"): "avaa",
+            ("vastata", "1", "Plur"): "vastaamme",
+            ("tarvita", "1", "Sing"): "tarvitsen",
+            ("tarvita", "3", "Sing"): "tarvitsee",
+            ("vanheta", "1", "Sing"): "vanhenen",
+            ("vanheta", "3", "Sing"): "vanhenee",
+        }
+        for (lemma, person, number), surface in cases.items():
+            verdict, predicted = _verify(
+                lemma,
+                "verb",
+                surface,
+                {"Mood": "Ind", "Tense": "Pres", "Person": person, "Number": number},
+            )
+            self.assertEqual(verdict, Verdict.VERIFIED, msg=f"{lemma} -> {predicted}")
+            self.assertEqual(predicted, surface)
+
+    def test_compound_irregular_verbs_are_verified(self):
+        cases = {
+            ("ulostehdä", "1", "Plur"): "ulosteemme",
+            ("oikosulkea", "1", "Sing"): "oikosuljen",
+            ("poissulkea", "2", "Sing"): "poissuljet",
+            ("alaspolkea", "1", "Sing"): "alaspoljen",
+        }
+        for (lemma, person, number), surface in cases.items():
+            verdict, predicted = _verify(
+                lemma,
+                "verb",
+                surface,
+                {"Mood": "Ind", "Tense": "Pres", "Person": person, "Number": number},
+            )
+            self.assertEqual(verdict, Verdict.VERIFIED, msg=lemma)
+            self.assertEqual(predicted, surface)
+
+    def test_past_conditional_and_present_passive_paradigms(self):
+        # Past active indicative
+        for lemma, person, number, surface in (
+            ("puhua", "3", "Sing", "puhui"),
+            ("puhua", "1", "Sing", "puhuin"),
+            ("juoda", "1", "Sing", "join"),
+            ("opiskella", "3", "Sing", "opiskeli"),
+            ("haluta", "1", "Sing", "halusin"),
+            ("tarvita", "3", "Sing", "tarvitsi"),
+            ("vanheta", "3", "Sing", "vanheni"),
+            ("ulostehdä", "3", "Sing", "ulosteki"),
+        ):
+            verdict, predicted = _verify(
+                lemma,
+                "verb",
+                surface,
+                {"Mood": "Ind", "Tense": "Past", "Person": person, "Number": number},
+            )
+            self.assertEqual(verdict, Verdict.VERIFIED, msg=f"{lemma} past")
+            self.assertEqual(predicted, surface)
+
+        # Conditional active
+        for lemma, person, number, surface in (
+            ("puhua", "1", "Sing", "puhuisin"),
+            ("lukea", "3", "Sing", "lukisi"),
+            ("juoda", "1", "Sing", "joisin"),
+            ("saada", "1", "Sing", "saisin"),
+            ("opiskella", "1", "Sing", "opiskelisin"),
+            ("haluta", "1", "Sing", "haluaisin"),
+            ("avata", "1", "Sing", "avaisin"),
+            ("tarvita", "1", "Sing", "tarvitsisin"),
+            ("vanheta", "3", "Sing", "vanhenisi"),
+        ):
+            verdict, predicted = _verify(
+                lemma,
+                "verb",
+                surface,
+                {"Mood": "Cnd", "Tense": "Pres", "Person": person, "Number": number},
+            )
+            self.assertEqual(verdict, Verdict.VERIFIED, msg=f"{lemma} cnd")
+            self.assertEqual(predicted, surface)
+
+        # Present passive
+        for lemma, surface in (
+            ("puhua", "puhutaan"),
+            ("antaa", "annetaan"),
+            ("odottaa", "odotetaan"),
+            ("juoda", "juodaan"),
+            ("syödä", "syödään"),
+            ("olla", "ollaan"),
+            ("opiskella", "opiskellaan"),
+            ("haluta", "halutaan"),
+            ("tarvita", "tarvitaan"),
+            ("vanheta", "vanhetaan"),
+        ):
+            verdict, predicted = _verify(
+                lemma,
+                "verb",
+                surface,
+                {"Mood": "Ind", "Tense": "Pres", "Voice": "Pass"},
+            )
+            self.assertEqual(verdict, Verdict.VERIFIED, msg=f"{lemma} pass")
+            self.assertEqual(predicted, surface)
+
+    def test_source_template_does_not_rubber_stamp_wrong_case_or_person(self):
+        wrong_nominal = validate_form(
+            lemma="koira",
+            part_of_speech="noun",
+            surface_form="koirassa",
+            features={"case": "genitive", "number": "singular", "source_class": "10/koira"},
+        )
+        self.assertEqual(wrong_nominal.verdict, Verdict.MISMATCH)
+
+        wrong_verb = validate_form(
+            lemma="sallia",
+            part_of_speech="verb",
+            surface_form="sallivat",
+            features={
+                "Person": "1",
+                "Number": "Sing",
+                "Mood": "Ind",
+                "Tense": "Pres",
+                "source_class": "61/sallia",
+            },
+        )
+        self.assertEqual(wrong_verb.verdict, Verdict.MISMATCH)
 
     def test_oitse_present_variants_are_verified_for_listed_verbs(self):
         cases = {

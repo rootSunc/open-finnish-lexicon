@@ -231,3 +231,57 @@ class SchemaIndexTests(unittest.TestCase):
                 "idx_usage_warning_lexeme_id",
             ],
         )
+
+    def test_optimization_fk_indexes_and_columns_exist(self):
+        with psycopg.connect(get_test_database_url()) as conn:
+            index_rows = conn.execute(
+                """
+                select indexname
+                from pg_indexes
+                where indexname in (
+                    'idx_lexical_relation_target_lexeme_id',
+                    'idx_derivation_relation_child_lexeme_id',
+                    'idx_lexeme_topic_sense_id',
+                    'idx_zh_gloss_sense_id',
+                    'idx_grammar_note_sense_id',
+                    'idx_usage_warning_sense_id',
+                    'idx_semantic_sense_alignment_target_sense',
+                    'idx_semantic_sense_alignment_candidate_target_sense',
+                    'idx_lexeme_canonical_lemma'
+                )
+                order by indexname
+                """
+            ).fetchall()
+            columns = conn.execute(
+                """
+                select table_schema, table_name, column_name
+                from information_schema.columns
+                where (table_schema = 'lexicon' and table_name = 'lexeme' and column_name = 'is_lemma')
+                   or (table_schema = 'lexicon' and table_name = 'example' and column_name = 'attribution')
+                   or (table_schema = 'zh_layer' and table_name = 'zh_example_translation' and column_name = 'is_usable')
+                order by table_schema, table_name, column_name
+                """
+            ).fetchall()
+
+        self.assertEqual(
+            [row[0] for row in index_rows],
+            [
+                "idx_derivation_relation_child_lexeme_id",
+                "idx_grammar_note_sense_id",
+                "idx_lexeme_canonical_lemma",
+                "idx_lexeme_topic_sense_id",
+                "idx_lexical_relation_target_lexeme_id",
+                "idx_semantic_sense_alignment_candidate_target_sense",
+                "idx_semantic_sense_alignment_target_sense",
+                "idx_usage_warning_sense_id",
+                "idx_zh_gloss_sense_id",
+            ],
+        )
+        self.assertEqual(
+            columns,
+            [
+                ("lexicon", "example", "attribution"),
+                ("lexicon", "lexeme", "is_lemma"),
+                ("zh_layer", "zh_example_translation", "is_usable"),
+            ],
+        )

@@ -32,13 +32,21 @@ class SourceRegistryTests(unittest.TestCase):
             SYNC_SOURCE_ORDER,
             (
                 "kaikki",
-                "omorfi",
                 "tatoeba",
                 "frequency",
+                "omorfi",
                 "finnwordnet",
                 "dbnary_zh",
                 "wiktionary_zh",
             ),
+        )
+        self.assertLess(
+            SYNC_SOURCE_ORDER.index("tatoeba"),
+            SYNC_SOURCE_ORDER.index("omorfi"),
+        )
+        self.assertLess(
+            SYNC_SOURCE_ORDER.index("frequency"),
+            SYNC_SOURCE_ORDER.index("omorfi"),
         )
         self.assertEqual(CHINESE_CANDIDATE_SOURCES, {"wiktionary_zh", "dbnary_zh"})
 

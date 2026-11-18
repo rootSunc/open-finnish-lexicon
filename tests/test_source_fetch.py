@@ -250,3 +250,94 @@ class InterruptedExtractionTests(unittest.TestCase):
                 expected = source.read()
             self.assertEqual(result.member_paths[0].read_text(encoding="utf-8"), expected)
             self.assertFalse(list(unpack_dir.glob(".*.part")))
+
+    def test_bad_checksum_deletes_corrupted_cached_archive(self):
+        archive_path = Path("tests/fixtures/releases/omorfi-fixture.tar.gz").resolve()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            release = SourceRelease(
+                name="omorfi",
+                version="fixture-bad-sum",
+                source_kind="tsv",
+                url=str(archive_path),
+                local_path="",
+                archive_kind="tar.gz",
+                checksum_sha256="0" * 64,
+                members=(),
+                companions=(),
+            )
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                fetch_release(release, Path(tmpdir))
+            cached_dir = Path(tmpdir) / "releases/omorfi/fixture-bad-sum"
+            self.assertFalse((cached_dir / archive_path.name).exists())
+
+    def test_zip_cumulative_unpacked_bytes_limit_is_enforced(self):
+        import zipfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = Path(tmpdir) / "bomb.zip"
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("a.txt", "x" * 600)
+                zf.writestr("b.txt", "y" * 600)
+            release = SourceRelease(
+                name="bomb",
+                version="v1",
+                source_kind="text",
+                url=str(zip_path),
+                local_path="",
+                archive_kind="zip",
+                checksum_sha256="",
+                members=("a.txt", "b.txt"),
+                companions=(),
+            )
+            with patch("open_finnish_lexicon.sources.fetch.MAX_EXTRACTED_BYTES", 1000):
+                with self.assertRaisesRegex(ValueError, "exceeds the 1000 byte safety limit"):
+                    fetch_release(release, Path(tmpdir))
+
+    def test_download_retries_and_rejects_truncated_content_length(self):
+        from http.client import IncompleteRead
+        from unittest.mock import patch
+        from urllib.error import URLError
+        from open_finnish_lexicon.sources.fetch import _download_to_path
+
+        class _FakeResponse(io.BytesIO):
+            def __init__(self, body: bytes, status: int = 200, headers: dict[str, str] | None = None):
+                super().__init__(body)
+                self.status = status
+                self.headers = headers or {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                self.close()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "sample.bin"
+            attempts = {"n": 0}
+
+            def _flaky_urlopen(_req, timeout=0):
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise URLError("temporary reset")
+                return _FakeResponse(b"hello world", headers={"Content-Length": "11"})
+
+            with (
+                patch("open_finnish_lexicon.sources.fetch.urlopen", side_effect=_flaky_urlopen),
+                patch("open_finnish_lexicon.sources.fetch.time.sleep"),
+            ):
+                _download_to_path("https://example.test/sample.bin", dest)
+            self.assertEqual(dest.read_bytes(), b"hello world")
+
+            truncated_dest = Path(tmpdir) / "truncated.bin"
+            with (
+                patch(
+                    "open_finnish_lexicon.sources.fetch.urlopen",
+                    side_effect=lambda _req, timeout=0: _FakeResponse(
+                        b"short", headers={"Content-Length": "100"}
+                    ),
+                ),
+                patch("open_finnish_lexicon.sources.fetch.time.sleep"),
+            ):
+                with self.assertRaises(IncompleteRead):
+                    _download_to_path("https://example.test/truncated.bin", truncated_dest)

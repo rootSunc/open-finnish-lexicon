@@ -32,10 +32,10 @@ def init_db() -> int:
             """
         )
         done = {row[0] for row in conn.execute("select name from public.ofl_migration")}
-        for name, sql in _migrations():
+        for name, migration_sql in _migrations():
             if name in done:
                 continue
-            conn.execute(sql)
+            conn.execute(migration_sql.encode("utf-8"))
             conn.execute("insert into public.ofl_migration (name) values (%s)", (name,))
             applied.append(name)
         conn.commit()

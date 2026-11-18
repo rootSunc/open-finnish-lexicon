@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
     services:
       postgres:
         image: postgres:17
@@ -31,4 +31,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --group dev
       - run: uv run ruff check src tests
+      - run: uv run ty check src
       - run: uv run pytest -q

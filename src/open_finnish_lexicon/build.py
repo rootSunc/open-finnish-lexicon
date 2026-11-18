@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -25,6 +26,11 @@ class BuildOptions:
     manifest: Path | None = None
     skip_sync: bool = False
     report: bool = True
+    overwrite: bool = False
+    sources: tuple[str, ...] | None = None
+    exclude_sources: tuple[str, ...] | None = None
+    force_download: bool = False
+    pure_jsonl: bool = False
 
 
 @dataclass
@@ -52,22 +58,19 @@ def _log(message: str) -> None:
 
 
 def build(options: BuildOptions) -> BuildResult:
-    """Schema → sync every source → reconcile → refresh → export (+ report).
-
-    Fails before touching the database when the output already exists or its
-    format is unknown, so a long sync never ends in a refused export.
-    """
+    """Schema -> sync every source -> reconcile -> refresh -> export (+ report)."""
 
     fmt = output_format(options.output)
     report_path = report_path_for(options.output) if options.report else None
-    for path in (options.output, report_path):
-        if path is not None and path.exists():
-            raise FileExistsError(f"{path} already exists")
+    if not options.overwrite:
+        for path in (options.output, report_path):
+            if path is not None and path.exists():
+                raise FileExistsError(f"{path} already exists")
     options.output.parent.mkdir(parents=True, exist_ok=True)
 
     result = BuildResult(output=options.output, report_path=report_path)
 
-    def step(name: str, fn) -> None:
+    def step(name: str, fn: Callable[[], object]) -> None:
         _log(f"{name}: starting")
         started = time.monotonic()
         fn()
@@ -76,19 +79,52 @@ def build(options: BuildOptions) -> BuildResult:
 
     step("init-db", init_db)
     if not options.skip_sync:
-        step("sync", lambda: sync_all(manifest_path=options.manifest, refresh=False))
+        if options.sources or options.exclude_sources or options.force_download:
+            step(
+                "sync",
+                lambda: sync_all(
+                    manifest_path=options.manifest,
+                    refresh=False,
+                    sources=options.sources,
+                    exclude_sources=options.exclude_sources,
+                    force_download=options.force_download,
+                ),
+            )
+        else:
+            step("sync", lambda: sync_all(manifest_path=options.manifest, refresh=False))
+
     step("reconcile", reconcile_lexemes)
     step("refresh", refresh_runtime_views)
+
     if fmt == "sqlite":
-        step("export", lambda: export_sqlite(options.output))
+        if options.overwrite:
+            step("export", lambda: export_sqlite(options.output, overwrite=True))
+        else:
+            step("export", lambda: export_sqlite(options.output))
     else:
-        step("export", lambda: export_jsonl(options.output))
+        if options.overwrite or options.pure_jsonl:
+            step(
+                "export",
+                lambda: export_jsonl(
+                    options.output,
+                    overwrite=options.overwrite,
+                    include_sources_header=not options.pure_jsonl,
+                ),
+            )
+        else:
+            step("export", lambda: export_jsonl(options.output))
+
     if report_path is not None:
         metrics = collect_data_quality_metrics()
         metrics["build_steps_seconds"] = result.steps
-        report_path.write_text(
-            json.dumps(metrics, ensure_ascii=False, indent=2, default=str) + "\n",
-            encoding="utf-8",
-        )
+        temp_report = report_path.with_name(f".{report_path.name}.part")
+        try:
+            temp_report.write_text(
+                json.dumps(metrics, ensure_ascii=False, indent=2, default=str) + "\n",
+                encoding="utf-8",
+            )
+            temp_report.replace(report_path)
+        finally:
+            temp_report.unlink(missing_ok=True)
         _log(f"report written to {report_path}")
     return result

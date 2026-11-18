@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from open_finnish_lexicon.cli.parsers import OflArgumentParser
 from open_finnish_lexicon.normalize.lexemes import (
     normalize_lexemes,
     prune_empty_lexemes,
@@ -10,10 +11,23 @@ from open_finnish_lexicon.normalize.lexemes import (
 
 
 def dispatch(argv: list[str]) -> int | None:
-    if len(argv) == 1 and argv[0] == "normalize-lexemes":
+    if not argv:
+        return None
+    cmd = argv[0]
+
+    if cmd == "normalize-lexemes":
+        OflArgumentParser(
+            prog="ofl normalize-lexemes",
+            description="Merge duplicate lexemes sharing normalized lemma and part of speech.",
+        ).parse_args(argv[1:])
         normalize_lexemes()
         return 0
-    if len(argv) == 1 and argv[0] == "reconcile-lexemes":
+
+    if cmd == "reconcile-lexemes":
+        OflArgumentParser(
+            prog="ofl reconcile-lexemes",
+            description="Normalize duplicates, align surface forms, and prune empty shells.",
+        ).parse_args(argv[1:])
         stats = reconcile_lexemes()
         print(
             "reconcile lexemes: "
@@ -23,7 +37,13 @@ def dispatch(argv: list[str]) -> int | None:
             f"passes={stats.pass_count}"
         )
         return 0
-    if len(argv) == 1 and argv[0] == "prune-empty-lexemes":
+
+    if cmd == "prune-empty-lexemes":
+        OflArgumentParser(
+            prog="ofl prune-empty-lexemes",
+            description="Merge or drop lexemes that carry no senses.",
+        ).parse_args(argv[1:])
         prune_empty_lexemes()
         return 0
+
     return None

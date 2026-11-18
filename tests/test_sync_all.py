@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import psycopg
 
@@ -95,9 +96,10 @@ class SyncAllTests(unittest.TestCase):
 
     def test_sync_all_imports_all_sources_from_manifest(self):
         manifest_path = "tests/fixtures/releases/test_source_releases.toml"
-        with tempfile.TemporaryDirectory() as data_dir:
-            os.environ["OFL_DATA_DIR"] = data_dir
-
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            patch.dict(os.environ, {"OFL_DATA_DIR": data_dir}),
+        ):
             exit_code = main(["sync-all", "--manifest", manifest_path])
 
             self.assertEqual(exit_code, 0)

@@ -67,8 +67,11 @@ class BuildFixtureRunTests(unittest.TestCase):
         with psycopg.connect(get_test_database_url()) as conn:
             conn.execute(f"truncate {DATA_TABLES} restart identity cascade")
             conn.commit()
-        with tempfile.TemporaryDirectory() as data_dir, tempfile.TemporaryDirectory() as out_dir:
-            os.environ["OFL_DATA_DIR"] = data_dir
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            tempfile.TemporaryDirectory() as out_dir,
+            patch.dict(os.environ, {"OFL_DATA_DIR": data_dir}),
+        ):
             output = Path(out_dir) / "release" / "fi.sqlite"
             exit_code = main(["build", "--output", str(output), "--manifest", FIXTURE_MANIFEST])
 
