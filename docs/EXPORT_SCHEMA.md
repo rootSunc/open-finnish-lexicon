@@ -95,6 +95,7 @@ For strict homogeneous JSONL pipelines (DuckDB, Polars, Spark, HuggingFace `data
       "gloss_en": "to run",
       "gloss_fi": null,
       "gloss_zh": "奔跑；跑",
+      "gloss_zh_method": "wiktionary_zh-rule",
       "labels": ["literal"],
       "notes": ["Often used for physical running."],
       "warnings": [],
@@ -120,6 +121,29 @@ For strict homogeneous JSONL pipelines (DuckDB, Polars, Spark, HuggingFace `data
   "relations": [{"target_lexeme_id": 42, "target_lemma": "liikkua", "type": "hypernym"}],
   "derivations": [{"child_lexeme_id": 99, "child_lemma": "juoksija", "type": "derived-term"}],
   "collocations": [{"phrase": "juosta pakoon", "score": 8.42, "sense_id": null}],
-  "topics": [{"id": "sports", "label_en": "Sports", "confidence": 0.7, "sense_id": 1}]
+  "topics": [{"topic_id": "sports", "label_en": "Sports", "label_cn": "体育", "sense_id": 1}]
 }
+```
+
+---
+
+## 3. Compressed Release Bundles (`.zst` & `SHA256SUMS`)
+
+`ofl package-release --dist-dir dist --overwrite` builds a complete downstream distribution bundle:
+
+| Artifact | Description |
+| :--- | :--- |
+| `fi.sqlite.zst` | Zstandard-compressed standalone SQLite database (with FTS5 and `v_lexeme_summary`). |
+| `fi.jsonl.zst` | Zstandard-compressed JSON Lines export. |
+| `fi.sqlite.report.json` | Build step timings, row counts, coverage metrics, and SPDX source attributions. |
+| `release-manifest.json` | Machine-readable artifact metadata (compressed/uncompressed byte sizes, ratios, SHA-256 digests, and dataset summary). |
+| `SHA256SUMS` | Standard checksum manifest verifiable via `shasum -a 256 -c SHA256SUMS` or `sha256sum -c SHA256SUMS`. |
+
+### Verifying & Unpacking Downstream
+
+```bash
+cd dist
+shasum -a 256 -c SHA256SUMS
+zstd -d -k fi.sqlite.zst -o fi.sqlite
+zstd -d -k fi.jsonl.zst -o fi.jsonl
 ```

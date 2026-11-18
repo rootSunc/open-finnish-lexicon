@@ -292,6 +292,7 @@ select jsonb_build_object(
             'gloss_en', s.gloss_en,
             'gloss_fi', s.gloss_fi,
             'gloss_zh', zg.gloss_zh,
+            'gloss_zh_method', zg.generation_method,
             'labels', s.labels,
             'notes', coalesce((
                 select jsonb_agg(gn.note_en order by gn.id)
@@ -328,7 +329,7 @@ select jsonb_build_object(
         ) order by s.sort_order, s.id)
         from lexicon.lexeme_sense s
         left join lateral (
-            select g.gloss_zh
+            select g.gloss_zh, g.generation_method
             from zh_layer.zh_gloss g
             where g.sense_id = s.id and g.is_primary
             order by g.id desc

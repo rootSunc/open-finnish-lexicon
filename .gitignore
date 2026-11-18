@@ -11,4 +11,6 @@ dist/
 data/
 *.sqlite
 *.jsonl
+*.zst
+SHA256SUMS
 !tests/fixtures/**/*.jsonl

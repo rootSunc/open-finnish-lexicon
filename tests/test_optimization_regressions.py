@@ -13,6 +13,7 @@ import pytest
 from open_finnish_lexicon.cli import main
 from open_finnish_lexicon.morphology.rules import Verdict, validate_form
 from open_finnish_lexicon.normalize.collocations import rebuild_collocations
+from open_finnish_lexicon.release import sha256_file
 from open_finnish_lexicon.sources.cedict_zh_loader import read_cedict_zh_entries
 from open_finnish_lexicon.sources.finnwordnet_project import project_finnwordnet_rows
 from open_finnish_lexicon.sources.finnwordnet_stage import stage_finnwordnet_rows
@@ -138,6 +139,35 @@ class PurePythonOptimizationTests(unittest.TestCase):
             self.assertNotIn(("surname mei", False), cedict_rows)
             self.assertEqual(cedict_rows[("Finland", False)], "芬兰")
             self.assertEqual(cedict_rows[("merely", False)], "仅仅")
+
+    def test_package_release_offline_zst_and_sha256sums(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dist = Path(tmpdir)
+            (dist / "fi.sqlite").write_bytes(b"SQLite format 3\x00" + b"x" * 4096)
+            (dist / "fi.jsonl").write_text('{"lemma":"juosta"}\n' * 50, encoding="utf-8")
+            (dist / "fi.sqlite.report.json").write_text(
+                json.dumps({"counts": {"lexicon.lexeme": 1}, "invalid_zh_glosses": 0}),
+                encoding="utf-8",
+            )
+            rc = main(
+                [
+                    "package-release",
+                    "--dist-dir",
+                    str(dist),
+                    "--level",
+                    "3",
+                    "--no-export",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            self.assertTrue((dist / "fi.sqlite.zst").is_file())
+            self.assertTrue((dist / "fi.jsonl.zst").is_file())
+            self.assertTrue((dist / "release-manifest.json").is_file())
+            checksums_lines = (dist / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(checksums_lines), 4)
+            for line in checksums_lines:
+                digest, fname = line.split("  ", 1)
+                self.assertEqual(digest, sha256_file(dist / fname))
 
 
 @pytest.mark.db

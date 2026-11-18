@@ -90,7 +90,8 @@ ofl sync-all                     # download and ingest every source
 ofl reconcile-lexemes            # merge duplicates and prune shells
 ofl refresh                      # collocations, Chinese layer, form checks
 ofl report-data-quality
-ofl export-sqlite --output fi.sqlite
+ofl export-sqlite --output dist/fi.sqlite
+ofl package-release --dist-dir dist --overwrite   # produces .sqlite.zst, .jsonl.zst, SHA256SUMS
 ```
 
 To ingest one local file instead, use `ingest-<source> --input <path>`

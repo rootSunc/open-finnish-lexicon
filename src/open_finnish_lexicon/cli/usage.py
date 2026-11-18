@@ -43,4 +43,7 @@ export
                                  write lexicon and Chinese layer to one SQLite file
   export-jsonl --output <path> [--overwrite] [--pure-jsonl]
                                  write one JSON object per lexeme
+  package-release [--dist-dir <dir>] [--prefix <name>] [--level <1..22>]
+                  [--no-export] [--pure-jsonl] [--remove-uncompressed] [--overwrite]
+                                 compress .sqlite.zst + .jsonl.zst and write SHA256SUMS
 """

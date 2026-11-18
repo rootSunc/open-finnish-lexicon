@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from open_finnish_lexicon.cli.parsers import OflArgumentParser, non_empty_str
+from open_finnish_lexicon.cli.parsers import OflArgumentParser, non_empty_str, positive_int
 from open_finnish_lexicon.export import export_jsonl, export_sqlite
+from open_finnish_lexicon.release import package_release
 
 
 def dispatch(argv: list[str]) -> int | None:
@@ -75,6 +76,72 @@ def dispatch(argv: list[str]) -> int | None:
         else:
             written = export_jsonl(Path(ns.output))
         print(f"export jsonl: lexemes={written}")
+        return 0
+
+    if cmd == "package-release":
+        parser = OflArgumentParser(
+            prog="ofl package-release",
+            description=(
+                "Package .sqlite.zst and .jsonl.zst distribution archives with "
+                "release-manifest.json and SHA256SUMS."
+            ),
+        )
+        parser.add_argument(
+            "--dist-dir",
+            type=non_empty_str,
+            default="dist",
+            help="Directory for release artifacts (default: dist)",
+        )
+        parser.add_argument(
+            "--prefix",
+            type=non_empty_str,
+            default="fi",
+            help="Base filename stem (default: fi)",
+        )
+        parser.add_argument(
+            "--level",
+            type=positive_int,
+            default=19,
+            help="Zstandard compression level 1..22 (default: 19)",
+        )
+        parser.add_argument(
+            "--no-export",
+            action="store_true",
+            help="Require pre-existing .sqlite/.jsonl/.report.json instead of querying PostgreSQL",
+        )
+        parser.add_argument(
+            "--pure-jsonl",
+            "--no-sources-header",
+            dest="pure_jsonl",
+            action="store_true",
+            help="Omit the leading _sources metadata line when exporting missing JSONL",
+        )
+        parser.add_argument(
+            "--remove-uncompressed",
+            action="store_true",
+            help="Remove uncompressed .sqlite and .jsonl after verifying .zst archives",
+        )
+        parser.add_argument(
+            "--overwrite",
+            "--force",
+            dest="overwrite",
+            action="store_true",
+            help="Replace existing .zst, manifest, and SHA256SUMS files",
+        )
+        ns = parser.parse_args(argv[1:])
+        bundle = package_release(
+            Path(ns.dist_dir),
+            prefix=ns.prefix,
+            level=ns.level,
+            export_missing=not ns.no_export,
+            pure_jsonl=ns.pure_jsonl,
+            keep_uncompressed=not ns.remove_uncompressed,
+            overwrite=ns.overwrite,
+        )
+        print(
+            f"package release: sqlite_zst={bundle.sqlite_zst} "
+            f"jsonl_zst={bundle.jsonl_zst} checksums={bundle.checksums_path}"
+        )
         return 0
 
     return None
