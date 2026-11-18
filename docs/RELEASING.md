@@ -21,15 +21,21 @@ Keep a single writer on the build database until the exports finish. Have
 `zstd` installed for compression and verification.
 
 ```bash
+release_tag=v1.0.0
+git worktree add --detach "../open-finnish-lexicon-${release_tag}" "$release_tag"
+cd "../open-finnish-lexicon-${release_tag}"
+code_revision=$(git rev-parse "refs/tags/${release_tag}^{commit}")
+test "$(git rev-parse HEAD)" = "$code_revision" || exit 1
+uv sync --locked
 export OFL_DATABASE_URL='postgresql://ofl:ofl@127.0.0.1:54320/open_finnish_lexicon'
 export OFL_PROFILE=real
-export OFL_DATA_DIR=./data/data-v0.1.0
-ofl init-db
-ofl sync-all --no-refresh --exclude-sources omorfi
-ofl reconcile-lexemes
-ofl refresh
-ofl package-release --dist-dir dist/data-v0.1.0 \
-  --dataset-version data-v0.1.0 --code-revision "$(git rev-parse HEAD)" \
+export OFL_DATA_DIR="./data/${release_tag}"
+uv run --locked ofl init-db
+uv run --locked ofl sync-all --no-refresh --exclude-sources omorfi
+uv run --locked ofl reconcile-lexemes
+uv run --locked ofl refresh
+uv run --locked ofl package-release --dist-dir "dist/${release_tag}" \
+  --dataset-version "$release_tag" --code-revision "$code_revision" \
   --remove-uncompressed
 ```
 

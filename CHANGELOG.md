@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0
 
 - Build an offline Finnish lexicon from Kaikki, FinnWordNet, Tatoeba,
   FrequencyWords and optional Omorfi. Export SQLite or JSON Lines.

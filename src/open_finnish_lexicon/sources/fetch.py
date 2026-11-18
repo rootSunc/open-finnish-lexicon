@@ -35,7 +35,7 @@ class FetchResult:
     assets: tuple[SourceAsset, ...] = ()
 
 
-USER_AGENT = "open-finnish-lexicon/0.1 (+https://github.com/open-finnish-lexicon; lexical-builder)"
+USER_AGENT = "open-finnish-lexicon/1.0.0 (+https://github.com/rootSunc/open-finnish-lexicon; lexical-builder)"
 DOWNLOAD_TIMEOUT_SECONDS = 60
 MAX_DOWNLOAD_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 1.5
