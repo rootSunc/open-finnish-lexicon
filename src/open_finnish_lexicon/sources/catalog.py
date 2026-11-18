@@ -28,8 +28,8 @@ class SourceRelease:
 
 
 def _build_companions(source_name: str, config: Mapping[str, object]) -> tuple[SourceCompanion, ...]:
-    companions = config.get("companions", [])
-    if not companions:
+    companions = config.get("companions")
+    if not isinstance(companions, list) or not companions:
         return ()
     return tuple(
         SourceCompanion(
@@ -41,6 +41,7 @@ def _build_companions(source_name: str, config: Mapping[str, object]) -> tuple[S
             members=tuple(companion["members"]),
         )
         for index, companion in enumerate(companions, start=1)
+        if isinstance(companion, Mapping)
     )
 
 

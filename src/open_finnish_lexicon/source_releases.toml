@@ -14,7 +14,9 @@ url = "https://kaikki.org/dictionary/Finnish/kaikki.org-dictionary-Finnish.jsonl
 local_path = ""
 archive_kind = "gz"
 checksum_sha256 = ""
-members = ["kaikki.org-dictionary-Finnish.jsonl"]
+# Streamed directly from the .jsonl.gz archive during staging; leave members
+# empty so fetch does not waste ~4.3 GB unpacking an unused plain JSONL copy.
+members = []
 
 [sources.finnwordnet]
 version = "2.0"
@@ -22,7 +24,7 @@ source_kind = "tsv"
 url = "https://www.kielipankki.fi/download/FinnWordNet/v2.0/FinnWordNet-2.0.zip"
 local_path = ""
 archive_kind = "zip"
-checksum_sha256 = ""
+checksum_sha256 = "fd613d9fb4bedf16002bfddef01fac6c0d2db79a701a35189557c909b9000615"
 members = ["FinnWordNet-2.0/rels"]
 
 [sources.tatoeba]
@@ -35,19 +37,27 @@ checksum_sha256 = ""
 members = ["fin_sentences_detailed.tsv"]
 [[sources.tatoeba.companions]]
 name = "links"
-url = "https://downloads.tatoeba.org/exports/links.csv"
+url = "https://downloads.tatoeba.org/exports/links.tar.bz2"
 local_path = ""
-archive_kind = "plain"
+archive_kind = "tar.bz2"
 checksum_sha256 = ""
 members = ["links.csv"]
 
 [[sources.tatoeba.companions]]
-name = "sentences"
-url = "https://downloads.tatoeba.org/exports/sentences.csv"
+name = "eng_sentences"
+url = "https://downloads.tatoeba.org/exports/per_language/eng/eng_sentences_detailed.tsv.bz2"
 local_path = ""
-archive_kind = "plain"
+archive_kind = "bz2"
 checksum_sha256 = ""
-members = ["sentences.csv"]
+members = ["eng_sentences_detailed.tsv"]
+
+[[sources.tatoeba.companions]]
+name = "cmn_sentences"
+url = "https://downloads.tatoeba.org/exports/per_language/cmn/cmn_sentences_detailed.tsv.bz2"
+local_path = ""
+archive_kind = "bz2"
+checksum_sha256 = ""
+members = ["cmn_sentences_detailed.tsv"]
 
 [sources.frequency]
 version = "2018-fi-50k"
@@ -55,7 +65,7 @@ source_kind = "txt"
 url = "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/fi/fi_50k.txt"
 local_path = ""
 archive_kind = "plain"
-checksum_sha256 = ""
+checksum_sha256 = "8bc1d43dd54ea0c4432b1f6ae497759a332e984224819cf8a4f2337681c803b4"
 members = ["fi_50k.txt"]
 
 [sources.wiktionary_zh]

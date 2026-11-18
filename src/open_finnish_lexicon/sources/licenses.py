@@ -13,7 +13,7 @@ SOURCE_LICENSES: dict[str, str] = {
     "tatoeba": "CC-BY-2.0-FR",
     "omorfi": "GPL-3.0-only",
     "frequency": "CC-BY-SA-4.0",
-    "finnwordnet": "CC-BY-3.0",
+    "finnwordnet": "WordNet AND CC-BY-3.0",
 }
 
 

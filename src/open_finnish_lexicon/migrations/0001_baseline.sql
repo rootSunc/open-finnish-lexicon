@@ -10,15 +10,13 @@ create extension if not exists pg_trgm with schema public;
 
 create schema if not exists lexicon;
 
-create schema if not exists lexicon;
-
 create schema if not exists semantic;
 
 create schema if not exists warehouse;
 
 create schema if not exists zh_layer;
 
-CREATE FUNCTION lexicon.immutable_unaccent(text) RETURNS text
+CREATE OR REPLACE FUNCTION lexicon.immutable_unaccent(text) RETURNS text
     LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
     AS $_$ select public.unaccent('public.unaccent', $1) $_$;
 
