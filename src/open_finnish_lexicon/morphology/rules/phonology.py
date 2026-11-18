@@ -89,7 +89,7 @@ class _AmbiguousGradation(Exception):
     """
 
 
-def _apply_weak_grade(stem: str) -> str | None:
+def _apply_weak_grade(stem: str) -> str:
     """Apply a single consonant gradation step (strong -> weak) on ``stem``.
 
     Returns the weak-grade stem when a deterministic geminate rule

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
-class Verdict(str, Enum):
+
+class Verdict(StrEnum):
     VERIFIED = "verified"
     MISMATCH = "mismatch"
     UNCERTAIN = "uncertain"

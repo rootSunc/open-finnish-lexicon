@@ -95,6 +95,7 @@ def validate_forms_with_rules() -> ValidationStats:
         # progress independently at large snapshot sizes.
         with connect() as source_conn:
             source_cursor = source_conn.cursor(name="form-validation-source")
+            source_cursor.itersize = 10_000
             source_cursor.execute(
                 """
                 select
@@ -187,14 +188,6 @@ def validate_forms_with_rules() -> ValidationStats:
         conn.commit()
 
     return ValidationStats(verified=verified, mismatch=mismatch, uncertain=uncertain)
-
-
-_FIXTURE_LEMMA_PATTERNS = ("zz%", "legacy-%")
-
-_LLM_TARGETS: dict[str, str] = {
-    "uncertain": "uncertain",
-    "mismatch": "mismatch",
-}
 
 
 __all__ = ["ValidationStats", "validate_forms_with_rules"]

@@ -48,10 +48,10 @@ the same version string.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Callable, Iterable
 
 #: Bumped when a recognition layer changes, so stored verdicts from an older
 #: rule set can be told apart and revalidated.
@@ -136,7 +136,7 @@ def find_omorfi_recased_analyser(data_dir: str | Path) -> Path | None:
 def load_omorfi_analyse(analyser_path: str | Path) -> Callable[[str], bool]:
     """Load the HFST analyser and return a ``token -> is analysable`` callable."""
 
-    from omorfi.omorfi import Omorfi
+    from omorfi.omorfi import Omorfi  # ty: ignore[import-not-found]
 
     omorfi = Omorfi()
     omorfi.load_analyser(str(analyser_path))

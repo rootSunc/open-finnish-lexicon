@@ -6,6 +6,7 @@ from open_finnish_lexicon.morphology.rules.features import (
     _contains_possessive,
     _features_lookup,
     _is_base_infinitive,
+    _is_passive_voice,
     _looks_like_infinitive,
     _normalise_case,
     _normalise_number,
@@ -37,6 +38,7 @@ from open_finnish_lexicon.morphology.rules.nominal import (
 )
 from open_finnish_lexicon.morphology.rules.phonology import _normalise
 from open_finnish_lexicon.morphology.rules.types import (
+    ALL_VOWELS,
     CASE_NAMES,
     NOMINAL_POS,
     VERB_POS,
@@ -47,6 +49,7 @@ from open_finnish_lexicon.morphology.rules.verbs import (
     _predict_negative_auxiliary,
     _predict_verb,
     _predict_verb_oitse_variant,
+    _predict_verb_type4_contracted_conditional,
 )
 
 
@@ -101,6 +104,95 @@ _SOURCE_TEMPLATE_FALLBACK_MARKERS = frozenset(
 
 def _uses_source_template_fallback(source_class: str) -> bool:
     return any(marker in source_class for marker in _SOURCE_TEMPLATE_FALLBACK_MARKERS)
+
+
+def _shares_lexical_prefix(lemma_norm: str, surface_norm: str) -> bool:
+    if len(lemma_norm) < 2:
+        return True
+    prefix_len = min(2, len(lemma_norm) - 1)
+    return surface_norm[:prefix_len] == lemma_norm[:prefix_len]
+
+
+def _matches_nominal_source_template(
+    *,
+    lemma_norm: str,
+    surface_norm: str,
+    case: str,
+    number: str,
+    source_class: str,
+) -> bool:
+    """Accept a Kotus source-template override only when its case/number
+    ending and stem prefix are morphologically consistent."""
+
+    if not _uses_source_template_fallback(source_class):
+        return False
+    if not _shares_lexical_prefix(lemma_norm, surface_norm):
+        return False
+    if case == "nom" and number == "sg":
+        return surface_norm == lemma_norm
+    if case == "acc" and number == "sg":
+        return surface_norm == lemma_norm or surface_norm.endswith("n")
+    if case in {"nom", "acc"} and number == "pl":
+        return surface_norm.endswith("t")
+    if case == "gen" and number == "sg":
+        return surface_norm.endswith("n") and surface_norm != lemma_norm
+    if case == "gen" and number == "pl":
+        return surface_norm.endswith(("en", "in", "ten", "den", "tten"))
+    if case == "par":
+        return surface_norm.endswith(("a", "ä", "ta", "tä"))
+    if case == "ine":
+        return surface_norm.endswith(("ssa", "ssä"))
+    if case == "ela":
+        return surface_norm.endswith(("sta", "stä"))
+    if case == "ill":
+        return len(surface_norm) >= 3 and surface_norm.endswith("n") and surface_norm[-2] in ALL_VOWELS
+    if case == "ade":
+        return surface_norm.endswith(("lla", "llä"))
+    if case == "abl":
+        return surface_norm.endswith(("lta", "ltä"))
+    if case == "all":
+        return surface_norm.endswith("lle")
+    if case == "ess":
+        return surface_norm.endswith(("na", "nä"))
+    if case == "tra":
+        return surface_norm.endswith("ksi")
+    if case == "abe":
+        return surface_norm.endswith(("tta", "ttä"))
+    if case == "com":
+        return surface_norm.endswith(("ne", "ine", "neen", "ni", "si", "nsa", "nsä", "mme", "nne"))
+    if case == "ins":
+        return surface_norm.endswith("n")
+    return False
+
+
+def _matches_verb_source_template(
+    *,
+    lemma_norm: str,
+    surface_norm: str,
+    person: str | None,
+    number: str | None,
+    passive: bool,
+    source_class: str,
+) -> bool:
+    if not _uses_source_template_fallback(source_class):
+        return False
+    if not _shares_lexical_prefix(lemma_norm, surface_norm):
+        return False
+    if passive:
+        return surface_norm.endswith(("aan", "ään"))
+    if (person, number) == ("1", "sg"):
+        return surface_norm.endswith("n")
+    if (person, number) == ("2", "sg"):
+        return surface_norm.endswith("t")
+    if (person, number) == ("3", "sg"):
+        return bool(surface_norm) and surface_norm[-1] in ALL_VOWELS
+    if (person, number) == ("1", "pl"):
+        return surface_norm.endswith("mme")
+    if (person, number) == ("2", "pl"):
+        return surface_norm.endswith("tte")
+    if (person, number) == ("3", "pl"):
+        return surface_norm.endswith(("vat", "vät"))
+    return False
 
 
 def _uses_source_comitative_possessive(
@@ -166,6 +258,8 @@ _OMORFI_VERB_VARIANTS = {
     ("ilkamoida", "3", "sg"): "ilkamoitsee",
     ("vihkiä", "1", "sg"): "vihin",
     ("vihkiä", "2", "sg"): "vihit",
+    ("vihkiä", "1", "pl"): "vihimme",
+    ("vihkiä", "2", "pl"): "vihitte",
 }
 
 _OMORFI_NOMINAL_VARIANTS = {
@@ -251,15 +345,6 @@ def validate_form(
             confidence=0.0,
         )
 
-    if _contains_possessive(features):
-        return RuleVerdict(
-            verdict=Verdict.UNCERTAIN,
-            predicted_surface=None,
-            rule=None,
-            explanation="possessive suffixes are validated by the LLM stage",
-            confidence=0.0,
-        )
-
     # ``name`` starts with the shorthand ``n`` but is not a noun. Keep the
     # explicit shorthands while avoiding accidental POS-prefix matches.
     is_nominal = pos in NOMINAL_POS or pos.startswith(
@@ -269,6 +354,15 @@ def validate_form(
     is_auxiliary = pos in {"aux", "auxiliary"} or pos.startswith("aux")
     is_verb_like = is_verb or is_auxiliary
     is_pronoun = pos in {"pron", "pronoun"} or pos.startswith("pron")
+
+    if _contains_possessive(features, is_verb=is_verb_like and not _looks_like_infinitive(features)):
+        return RuleVerdict(
+            verdict=Verdict.UNCERTAIN,
+            predicted_surface=None,
+            rule=None,
+            explanation="possessive suffixes are not modelled by the rule engine",
+            confidence=0.0,
+        )
     # Numeral paradigms (especially ordinals like ``kolmas``, ``yhdeksäs``)
     # follow their own rules and would confuse the as_grad classifier.
     is_numeral = pos in {"num", "numeral"} or pos.startswith("num")
@@ -463,6 +557,7 @@ def validate_form(
         number = _normalise_number(features) if person else None
         tense = _features_lookup(features, "tense", "Tense")
         mood = _features_lookup(features, "mood", "Mood")
+        passive = _is_passive_voice(features)
         infinitive = _is_base_infinitive(features)
         if _looks_like_infinitive(features) and not infinitive:
             return RuleVerdict(
@@ -479,22 +574,39 @@ def validate_form(
             person=person,
             number=number,
             infinitive=infinitive,
+            passive=passive,
+            source_class=source_class,
         )
         if predicted is None:
             return RuleVerdict(Verdict.UNCERTAIN, None, None, explanation, 0.0)
         predicted_norm = _normalise(predicted)
         verdict = Verdict.VERIFIED if predicted_norm == surface_norm else Verdict.MISMATCH
-        if verdict is Verdict.MISMATCH and rule and rule.startswith("verb/type2/pres."):
+        if verdict is Verdict.MISMATCH and rule and rule.startswith(
+            ("verb/type2/pres.", "verb/type2/past.", "verb/type2/cnd.")
+        ):
+            oitse_mode = rule.split("/")[2].split(".")[0]
             alternate = _predict_verb_oitse_variant(
                 lemma=lemma_norm,
                 person=person or "",
                 number=number or "",
                 source_class=str(features.get("source_class", "")),
+                mode=oitse_mode,
             )
             if alternate is not None and _normalise(alternate) == surface_norm:
                 predicted_norm = surface_norm
                 verdict = Verdict.VERIFIED
                 rule = f"{rule}/oitse-variant"
+        if verdict is Verdict.MISMATCH and rule and rule.startswith("verb/type4/cnd."):
+            alternate = _predict_verb_type4_contracted_conditional(
+                lemma=lemma_norm,
+                person=person or "",
+                number=number or "",
+                source_class=source_class,
+            )
+            if alternate is not None and _normalise(alternate) == surface_norm:
+                predicted_norm = surface_norm
+                verdict = Verdict.VERIFIED
+                rule = f"{rule}/contracted-cnd-variant"
         if verdict is Verdict.MISMATCH and features.get("source_variant"):
             return RuleVerdict(
                 verdict=Verdict.VERIFIED,
@@ -521,7 +633,14 @@ def validate_form(
                     ),
                     confidence=0.90,
                 )
-        if verdict is Verdict.MISMATCH and _uses_source_template_fallback(source_class):
+        if verdict is Verdict.MISMATCH and _matches_verb_source_template(
+            lemma_norm=lemma_norm,
+            surface_norm=surface_norm,
+            person=person,
+            number=number,
+            passive=passive,
+            source_class=source_class,
+        ):
             return RuleVerdict(
                 verdict=Verdict.VERIFIED,
                 predicted_surface=surface_norm,
@@ -555,7 +674,12 @@ def validate_form(
                 if verdict is Verdict.VERIFIED
                 and rule
                 and rule.endswith(
-                    ("/oitse-variant", "/orthographic-variant", "/source-variant")
+                    (
+                        "/contracted-cnd-variant",
+                        "/oitse-variant",
+                        "/orthographic-variant",
+                        "/source-variant",
+                    )
                 )
                 else 0.97
                 if verdict is Verdict.VERIFIED
@@ -635,7 +759,13 @@ def validate_form(
     if verdict is Verdict.MISMATCH and (
         "nuoripari" in source_class
         or features.get("source_possessive")
-        or _uses_source_template_fallback(source_class)
+        or _matches_nominal_source_template(
+            lemma_norm=lemma_norm,
+            surface_norm=surface_norm,
+            case=case,
+            number=number,
+            source_class=source_class,
+        )
         or _uses_source_comitative_possessive(
             form_kind=form_kind,
             case=case,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from open_finnish_lexicon.morphology.rules.types import CASE_CANONICAL, NUMBER_CANONICAL
 
+
 def _features_lookup(features: dict[str, str], *keys: str) -> str | None:
     if not features:
         return None
@@ -38,16 +39,19 @@ def _normalise_person(features: dict[str, str]) -> str | None:
     return {"1": "1", "2": "2", "3": "3"}.get(raw[0]) if raw else None
 
 
-def _contains_possessive(features: dict[str, str]) -> bool:
+def _contains_possessive(features: dict[str, str], *, is_verb: bool = False) -> bool:
     for key, value in features.items():
         if not value:
             continue
+        key_fold = key.casefold()
         # ``source_possessive`` is loader metadata describing the
         # Wiktionary template, not a surface-level possessive suffix on this
         # particular form.
-        if key.casefold() == "source_possessive":
+        if key_fold == "source_possessive":
             continue
-        if "poss" in key.casefold() or "psor" in key.casefold():
+        if "poss" in key_fold or "psor" in key_fold:
+            return True
+        if not is_verb and key_fold == "person":
             return True
     return False
 
@@ -62,12 +66,7 @@ def _looks_like_infinitive(features: dict[str, str]) -> bool:
 
 
 def _is_base_infinitive(features: dict[str, str]) -> bool:
-    """The base infinitive (kotus Inf=1) is the only one we model.
-
-    UD tag set surfaces this as ``VerbForm=Inf`` paired with ``InfForm=1``
-    and no case feature; anything else (Inf=2, 3, 4 in various cases) is
-    a non-finite participial form we do not yet predict.
-    """
+    """The base infinitive (kotus Inf=1) is the only infinitive we model."""
 
     if not _looks_like_infinitive(features):
         return False
@@ -84,8 +83,6 @@ def _is_base_infinitive(features: dict[str, str]) -> bool:
         return False
     case = _features_lookup(features, "case", "Case")
     if case:
-        # An infinitive in some oblique case is the 2nd/3rd infinitive's
-        # case form (e.g. illative is 3rd inf "tekemään"). Out of scope.
         return False
     return True
 
@@ -106,31 +103,37 @@ def _is_participle(features: dict[str, str]) -> bool:
     value = _features_lookup(features, "verbForm", "VerbForm")
     if value and "part" in value.lower():
         return True
-    if _features_lookup(features, "partForm", "PartForm"):
+    if _features_lookup(features, "partForm", "PartForm", "participle", "Participle"):
         return True
     return False
 
 
-def _is_non_indicative_finite(features: dict[str, str]) -> bool:
-    """Conditional, imperative, potential moods are not yet modelled."""
-
+def _normalise_mood(features: dict[str, str]) -> str | None:
     mood = _features_lookup(features, "mood", "Mood")
     if not mood:
-        return False
+        return None
     norm = mood.strip().lower()
     if norm in {"ind", "indicative"}:
-        return False
-    if norm in {"cnd", "cond", "imp", "imper", "pot", "potential"}:
-        return True
-    return False
+        return "ind"
+    if norm in {"cnd", "cond", "conditional"}:
+        return "cnd"
+    if norm in {"imp", "imper", "imperative"}:
+        return "imp"
+    if norm in {"pot", "potential"}:
+        return "pot"
+    return norm
 
 
-def _is_non_present_finite(features: dict[str, str]) -> bool:
+def _normalise_tense(features: dict[str, str]) -> str | None:
     tense = _features_lookup(features, "tense", "Tense")
     if not tense:
-        return False
+        return None
     norm = tense.strip().lower()
-    return norm not in {"pres", "present"}
+    if norm in {"pres", "present"}:
+        return "pres"
+    if norm in {"past", "imperfect", "impf"}:
+        return "past"
+    return norm
 
 
 def _is_passive_voice(features: dict[str, str]) -> bool:
@@ -163,11 +166,7 @@ def _is_abbreviation(features: dict[str, str]) -> bool:
 
 
 def _uncertain_guard_reason(features: dict[str, str], is_verb: bool) -> str | None:
-    """Cheap pre-flight gate: forms we deliberately don't try to predict.
-
-    Returning ``None`` means the form is within scope; any other string
-    is the explanation the caller logs on the ``UNCERTAIN`` verdict.
-    """
+    """Cheap pre-flight gate: forms we deliberately don't try to predict."""
 
     if _has_clitic(features):
         return "clitic suffix (-han / -pa / -ko / -kin / -kaan ...) not modelled"
@@ -183,21 +182,22 @@ def _uncertain_guard_reason(features: dict[str, str], is_verb: bool) -> str | No
         return "abbreviations are not modelled"
     derivation = _features_lookup(features, "derivation", "Derivation")
     if derivation:
-        # Omorfi labels verbal nouns such as ``oleminen`` with the
-        # ``Minen`` derivation while keeping the source lemma ``olla``.  A
-        # lemma-only paradigm rule would compare the derived noun against
-        # the verb and report a false mismatch.  Other derivational forms
-        # have the same shape problem, so leave them for source/LLM review.
         return "derived form not modelled"
     if is_verb:
         if _features_lookup(features, "case", "Case"):
             return "case-bearing non-finite verb form not modelled"
-        if _is_passive_voice(features):
-            return "passive voice not modelled"
         if _is_connegative(features):
             return "connegative form not modelled"
-        if _is_non_indicative_finite(features):
+        mood_norm = _normalise_mood(features)
+        tense_norm = _normalise_tense(features)
+        if _is_passive_voice(features):
+            if mood_norm not in {None, "ind"} or tense_norm not in {None, "pres"}:
+                return "non-present or non-indicative passive voice not modelled"
+            return None
+        if mood_norm not in {None, "ind", "cnd"}:
             return "non-indicative finite mood not modelled"
-        if _is_non_present_finite(features):
+        if mood_norm == "cnd" and tense_norm not in {None, "pres"}:
+            return "non-present conditional tense not modelled"
+        if tense_norm not in {None, "pres", "past"}:
             return "non-present tense not modelled"
     return None

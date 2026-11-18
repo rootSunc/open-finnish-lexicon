@@ -2963,7 +2963,7 @@ def _predict_vowel_short_variants(
     final ``-y``.
     """
 
-    variants: dict[tuple[str, str], str] = {
+    variants: dict[tuple[str, str, str], str] = {
         ("go", "par", "sg"): "gota",
         ("go", "ill", "sg"): "gohon",
         ("hobby", "par", "sg"): "hobbya",
