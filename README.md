@@ -6,7 +6,7 @@ open-finnish-lexicon downloads releases of Kaikki (Wiktionary), Omorfi, Tatoeba,
 FinnWordNet and a Finnish frequency list, merges them into one PostgreSQL
 schema, validates inflected forms with a rule engine, and exports the result
 to SQLite or JSON Lines. An optional layer adds Chinese glosses from the
-Chinese Wiktionary and DBnary.
+Chinese Wiktionary, DBnary, Chinese Open Wordnet (OMW), and CC-CEDICT.
 
 The project ships code only. The data you build keeps the licenses of its
 sources; see [NOTICE.md](NOTICE.md).
@@ -95,7 +95,7 @@ ofl export-sqlite --output fi.sqlite
 
 To ingest one local file instead, use `ingest-<source> --input <path>`
 (sources: `kaikki`, `omorfi`, `tatoeba`, `frequency`, `finnwordnet`,
-`wiktionary-zh`, `dbnary-zh`). Run `ofl help` for every command.
+`omw-zh`, `cedict-zh`, `wiktionary-zh`, `dbnary-zh`). Run `ofl help` for every command.
 
 ## Configuration
 

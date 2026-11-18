@@ -21,6 +21,8 @@ class SourceRegistryTests(unittest.TestCase):
                 "finnwordnet",
                 "tatoeba",
                 "frequency",
+                "omw_zh",
+                "cedict_zh",
                 "wiktionary_zh",
                 "dbnary_zh",
             ],
@@ -36,6 +38,8 @@ class SourceRegistryTests(unittest.TestCase):
                 "frequency",
                 "omorfi",
                 "finnwordnet",
+                "omw_zh",
+                "cedict_zh",
                 "dbnary_zh",
                 "wiktionary_zh",
             ),
@@ -48,7 +52,14 @@ class SourceRegistryTests(unittest.TestCase):
             SYNC_SOURCE_ORDER.index("frequency"),
             SYNC_SOURCE_ORDER.index("omorfi"),
         )
-        self.assertEqual(CHINESE_CANDIDATE_SOURCES, {"wiktionary_zh", "dbnary_zh"})
+        self.assertLess(
+            SYNC_SOURCE_ORDER.index("finnwordnet"),
+            SYNC_SOURCE_ORDER.index("omw_zh"),
+        )
+        self.assertEqual(
+            CHINESE_CANDIDATE_SOURCES,
+            {"wiktionary_zh", "dbnary_zh", "omw_zh", "cedict_zh"},
+        )
 
     def test_run_manual_ingest_routes_to_stage_and_project(self):
         input_path = Path("example.tsv")

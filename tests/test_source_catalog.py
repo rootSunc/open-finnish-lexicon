@@ -13,3 +13,5 @@ class SourceCatalogTests(unittest.TestCase):
         self.assertEqual(catalog["frequency"].source_kind, "csv")
         self.assertEqual(catalog["wiktionary_zh"].members, ("wiktionary-zh-fixture.jsonl",))
         self.assertEqual(catalog["dbnary_zh"].companions[0].name, "enhancement")
+        self.assertEqual(catalog["omw_zh"].source_kind, "tab")
+        self.assertEqual(catalog["cedict_zh"].source_kind, "cedict")

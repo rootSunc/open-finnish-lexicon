@@ -18,6 +18,8 @@ DEFAULT_ACCEPT_THRESHOLD = 0.88
 SOURCE_ACCEPT_THRESHOLDS = {
     "wiktionary_zh": 0.78,
     "dbnary_zh": 0.75,
+    "omw_zh": 0.76,
+    "cedict_zh": 0.73,
 }
 SELECTION_REASON = "rule confidence threshold met"
 
@@ -54,7 +56,17 @@ def select_zh_glosses(*, default_threshold: float = DEFAULT_ACCEPT_THRESHOLD) ->
               on document.id = candidate.source_document_id
             join warehouse.source_file file on file.id = document.source_file_id
             where file.snapshot_state = 'active'
-            order by candidate.target_sense_id, candidate.confidence_score desc, candidate.id
+            order by
+                candidate.target_sense_id,
+                candidate.confidence_score desc,
+                case candidate.source_name
+                    when 'wiktionary_zh' then 1
+                    when 'dbnary_zh' then 2
+                    when 'omw_zh' then 3
+                    when 'cedict_zh' then 4
+                    else 5
+                end,
+                candidate.id
             """
         ).fetchall()
         by_sense: dict[int, list[tuple]] = {}
@@ -71,16 +83,18 @@ def select_zh_glosses(*, default_threshold: float = DEFAULT_ACCEPT_THRESHOLD) ->
         conn.execute("delete from semantic.zh_gloss_selection")
         if selections:
             with conn.cursor() as cursor:
-                cursor.executemany(
+                with cursor.copy(
                     """
-                    insert into semantic.zh_gloss_selection (
+                    copy semantic.zh_gloss_selection (
                         target_sense_id, zh_gloss_candidate_id, gloss_zh,
                         selected_by, confidence_score, selection_reason
-                    )
-                    values (%s, %s, %s, 'rule', %s, %s)
-                    """,
-                    [(*row, SELECTION_REASON) for row in selections],
-                )
+                    ) from stdin
+                    """
+                ) as copy:
+                    for sense_id, candidate_id, gloss_zh, score in selections:
+                        copy.write_row(
+                            (sense_id, candidate_id, gloss_zh, "rule", score, SELECTION_REASON)
+                        )
         conn.commit()
     return len(selections)
 

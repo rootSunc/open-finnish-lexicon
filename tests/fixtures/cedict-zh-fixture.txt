@@ -1,0 +1,11 @@
+# CC-CEDICT fixture (CC-BY-SA-4.0)
+咖啡 咖啡 [ka1 fei1] /coffee/
+牛奶 牛奶 [niu2 nai3] /milk/
+因為 因为 [yin1 wei4] /because/owing to/
+如果 如果 [ru2 guo3] /if/in case/
+芬蘭 芬兰 [Fen1 lan2] /Finland/
+赫爾辛基 赫尔辛基 [He4 er3 xin1 ji1] /Helsinki/
+閱讀 阅读 [yue4 du2] /to read/
+知道 知道 [zhi1 dao5] /to know/to become aware of/
+梅 梅 [Mei2] /surname Mei/
+宋 宋 [Song4] /Song dynasty/surname Song/

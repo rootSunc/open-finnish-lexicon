@@ -12,6 +12,8 @@ from open_finnish_lexicon.db import connect, connection_scope
 from open_finnish_lexicon.enrich.zh import rebuild_chinese_glosses, select_zh_glosses
 from open_finnish_lexicon.morphology.validator import validate_forms_with_rules
 from open_finnish_lexicon.normalize.collocations import rebuild_collocations
+from open_finnish_lexicon.sources.cedict_zh_project import project_cedict_zh_rows
+from open_finnish_lexicon.sources.cedict_zh_stage import stage_cedict_zh_rows
 from open_finnish_lexicon.sources.dbnary_zh_project import project_dbnary_zh_rows
 from open_finnish_lexicon.sources.dbnary_zh_stage import stage_dbnary_zh_rows
 from open_finnish_lexicon.sources.finnwordnet_project import project_finnwordnet_rows
@@ -22,6 +24,8 @@ from open_finnish_lexicon.sources.kaikki_project import project_kaikki_entries
 from open_finnish_lexicon.sources.kaikki_stage import stage_kaikki_entries
 from open_finnish_lexicon.sources.omorfi_project import project_omorfi_rows
 from open_finnish_lexicon.sources.omorfi_stage import stage_omorfi_rows
+from open_finnish_lexicon.sources.omw_zh_project import project_omw_zh_rows
+from open_finnish_lexicon.sources.omw_zh_stage import stage_omw_zh_rows
 from open_finnish_lexicon.sources.tatoeba_project import project_tatoeba_rows
 from open_finnish_lexicon.sources.tatoeba_stage import stage_tatoeba_rows
 from open_finnish_lexicon.sources.warehouse import (
@@ -53,6 +57,8 @@ SOURCE_PIPELINES = frozenset(
         "tatoeba",
         "wiktionary_zh",
         "dbnary_zh",
+        "omw_zh",
+        "cedict_zh",
     }
 )
 
@@ -70,6 +76,8 @@ def get_source_pipeline(source_name: str) -> SourcePipeline:
             stage=stage_wiktionary_zh_rows, project=project_wiktionary_zh_rows
         ),
         "dbnary_zh": SourcePipeline(stage=stage_dbnary_zh_rows, project=project_dbnary_zh_rows),
+        "omw_zh": SourcePipeline(stage=stage_omw_zh_rows, project=project_omw_zh_rows),
+        "cedict_zh": SourcePipeline(stage=stage_cedict_zh_rows, project=project_cedict_zh_rows),
     }
     return pipelines[source_name]
 
@@ -80,6 +88,8 @@ FIXTURE_INPUTS: tuple[tuple[str, Path], ...] = (
     ("finnwordnet", Path("tests/fixtures/finnwordnet.tsv")),
     ("tatoeba", Path("tests/fixtures/tatoeba.tsv")),
     ("frequency", Path("tests/fixtures/frequency.csv")),
+    ("omw_zh", Path("tests/fixtures/omw-zh-fixture.tab")),
+    ("cedict_zh", Path("tests/fixtures/cedict-zh-fixture.txt")),
     ("wiktionary_zh", Path("tests/fixtures/wiktionary-zh-fixture.jsonl")),
     ("dbnary_zh", Path("tests/fixtures/dbnary-zh-exolex.ttl")),
 )
@@ -92,11 +102,13 @@ SYNC_SOURCE_ORDER = (
     "frequency",
     "omorfi",
     "finnwordnet",
+    "omw_zh",
+    "cedict_zh",
     "dbnary_zh",
     "wiktionary_zh",
 )
 
-CHINESE_CANDIDATE_SOURCES = {"wiktionary_zh", "dbnary_zh"}
+CHINESE_CANDIDATE_SOURCES = {"wiktionary_zh", "dbnary_zh", "omw_zh", "cedict_zh"}
 
 
 def _is_fixture_input_path(input_path: Path) -> bool:
@@ -204,7 +216,7 @@ def finalize_source_snapshot(
 def reproject_active_chinese_sources() -> None:
     """Re-align active Chinese candidate sources after lexeme reconciliation."""
 
-    for source_name in ("dbnary_zh", "wiktionary_zh"):
+    for source_name in ("omw_zh", "cedict_zh", "dbnary_zh", "wiktionary_zh"):
         with connect() as conn:
             active = active_source_file_for_name(conn, source_name=source_name)
             if active is None:

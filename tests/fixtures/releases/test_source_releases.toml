@@ -82,3 +82,21 @@ local_path = ""
 archive_kind = "plain"
 checksum_sha256 = ""
 members = ["dbnary-zh-enhancement.ttl"]
+
+[sources.omw_zh]
+version = "fixture-1"
+source_kind = "tab"
+url = "tests/fixtures/releases/omw-zh-fixture.tab"
+local_path = ""
+archive_kind = "plain"
+checksum_sha256 = ""
+members = []
+
+[sources.cedict_zh]
+version = "fixture-1"
+source_kind = "cedict"
+url = "tests/fixtures/releases/cedict-zh-fixture.txt"
+local_path = ""
+archive_kind = "plain"
+checksum_sha256 = ""
+members = []

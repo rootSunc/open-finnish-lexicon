@@ -13,11 +13,16 @@ import pytest
 from open_finnish_lexicon.cli import main
 from open_finnish_lexicon.morphology.rules import Verdict, validate_form
 from open_finnish_lexicon.normalize.collocations import rebuild_collocations
+from open_finnish_lexicon.sources.cedict_zh_loader import read_cedict_zh_entries
 from open_finnish_lexicon.sources.finnwordnet_project import project_finnwordnet_rows
 from open_finnish_lexicon.sources.finnwordnet_stage import stage_finnwordnet_rows
 from open_finnish_lexicon.sources.kaikki_loader import (
     compact_kaikki_entry,
     syllabify_finnish_word,
+)
+from open_finnish_lexicon.sources.omw_zh_loader import (
+    normalize_wn30_synset_key,
+    read_omw_zh_entries,
 )
 from open_finnish_lexicon.zh_script import (
     normalize_and_validate_zh_gloss,
@@ -100,6 +105,39 @@ class PurePythonOptimizationTests(unittest.TestCase):
                     features=features,
                 )
                 self.assertEqual(res.verdict, expected, msg=res.explanation)
+
+    def test_omw_and_cedict_loaders_filter_surnames_and_normalize_synsets(self):
+        self.assertEqual(normalize_wn30_synset_key("fi:s00003553"), ("00003553-a", "adj"))
+        self.assertEqual(normalize_wn30_synset_key("00003553-s"), ("00003553-a", "adj"))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            omw_file = root / "omw.tab"
+            omw_file.write_text(
+                "# OMW test\n"
+                "00003553-s\tcmn:lemma\t新興\n"
+                "02084071-n\tcmn:lemma\t狗\n",
+                encoding="utf-8",
+            )
+            omw_rows = {row["synset_id"]: row["gloss_zh"] for row in read_omw_zh_entries(omw_file)}
+            self.assertEqual(omw_rows, {"00003553-a": "新兴", "02084071-n": "狗"})
+
+            cedict_file = root / "cedict.txt"
+            cedict_file.write_text(
+                "宋 宋 [Song4] /Song dynasty/surname Song/\n"
+                "梅 梅 [Mei2] /surname Mei/\n"
+                "芬蘭 芬兰 [Fen1 lan2] /Finland/\n"
+                "僅僅 仅仅 [jin3 jin3] /only; merely; barely/\n",
+                encoding="utf-8",
+            )
+            cedict_rows = {
+                (row["en_key"], row["is_verb"]): row["gloss_zh"]
+                for row in read_cedict_zh_entries(cedict_file)
+            }
+            self.assertNotIn(("song", False), cedict_rows)
+            self.assertNotIn(("surname mei", False), cedict_rows)
+            self.assertEqual(cedict_rows[("Finland", False)], "芬兰")
+            self.assertEqual(cedict_rows[("merely", False)], "仅仅")
 
 
 @pytest.mark.db
@@ -393,3 +431,97 @@ class DatabaseOptimizationIntegrationTests(unittest.TestCase):
             }
             self.assertTrue(any("juoksen nopeasti" in p for p in phrases))
             self.assertFalse(any("varhain juoksen" in p for p in phrases))
+
+    def test_omw_synset_disambiguation_cedict_consensus_and_source_priority(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            kaikki_path = root / "kaikki.jsonl"
+            kaikki_rows = [
+                {
+                    "word": "kuusi",
+                    "lang": "Finnish",
+                    "pos": "noun",
+                    "senses": [
+                        {"id": "k1", "glosses": ["spruce (tree)"]},
+                        {"id": "k2", "glosses": ["six (the number)"]},
+                    ],
+                },
+                {
+                    "word": "vain",
+                    "lang": "Finnish",
+                    "pos": "adv",
+                    "senses": [{"id": "v1", "glosses": ["only, merely, solely"]}],
+                },
+                {
+                    "word": "ranta",
+                    "lang": "Finnish",
+                    "pos": "noun",
+                    "senses": [{"id": "r1", "glosses": ["bank"]}],
+                },
+            ]
+            kaikki_path.write_text(
+                "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kaikki_rows),
+                encoding="utf-8",
+            )
+            self.assertEqual(main(["ingest-kaikki", "--input", str(kaikki_path)]), 0)
+
+            fiwn_dir = root / "fiwn"
+            fiwn_dir.mkdir()
+            (fiwn_dir / "fiwn-wsenses.tsv").write_text(
+                "fi:n11653599\tkuusi\t0\nfi:n13746575\tkuusi\t0\n",
+                encoding="utf-8",
+            )
+            (fiwn_dir / "fiwn-transls.tsv").write_text(
+                "fi:n11653599\tkuusi\ten-3.0:n11653599\tspruce\tsynonym\n"
+                "fi:n13746575\tkuusi\ten-3.0:n13746575\tsix\tsynonym\n",
+                encoding="utf-8",
+            )
+            (fiwn_dir / "fiwn-lexrels.tsv").write_text("", encoding="utf-8")
+            (fiwn_dir / "fiwn-semrels.tsv").write_text("", encoding="utf-8")
+            sf_id = stage_finnwordnet_rows(fiwn_dir, version="test", source_url="test")
+            project_finnwordnet_rows(fiwn_dir, source_file_id=sf_id, only_existing_lexemes=True)
+            with psycopg.connect(get_test_database_url()) as conn:
+                conn.execute(
+                    "update warehouse.source_file set snapshot_state = 'active' where id = %s",
+                    (sf_id,),
+                )
+                conn.commit()
+
+            omw_path = root / "omw.tab"
+            omw_path.write_text(
+                "11653599-n\tcmn:lemma\t云杉\n"
+                "13746575-n\tcmn:lemma\t六\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(main(["ingest-omw-zh", "--input", str(omw_path)]), 0)
+
+            cedict_path = root / "cedict.txt"
+            cedict_path.write_text(
+                "僅僅 仅仅 [jin3 jin3] /only; merely; barely/\n"
+                "只是 只是 [zhi3 shi4] /merely; simply; only/\n"
+                "銀行 银行 [yin2 hang2] /bank/\n"
+                "松樹 松树 [song1 shu4] /spruce/\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(main(["ingest-cedict-zh", "--input", str(cedict_path)]), 0)
+            self.assertEqual(main(["refresh"]), 0)
+
+        with psycopg.connect(get_test_database_url()) as conn:
+            rows = {
+                (lemma, sense_key): (gloss_zh, method)
+                for lemma, sense_key, gloss_zh, method in conn.execute(
+                    """
+                    select l.lemma, s.sense_key, zg.gloss_zh, zg.generation_method
+                    from zh_layer.zh_gloss zg
+                    join lexicon.lexeme_sense s on s.id = zg.sense_id
+                    join lexicon.lexeme l on l.id = s.lexeme_id
+                    """
+                ).fetchall()
+            }
+            # OMW synset bridge disambiguated both senses of ``kuusi`` AND beat cedict_zh!
+            self.assertEqual(rows[("kuusi", "k1")], ("云杉", "omw_zh-rule"))
+            self.assertEqual(rows[("kuusi", "k2")], ("六", "omw_zh-rule"))
+            # CC-CEDICT multi-synonym consensus matched ``vain``!
+            self.assertEqual(rows[("vain", "v1")], ("仅仅；只是", "cedict_zh-rule"))
+            # Ambiguous single-word ``bank`` on ``ranta`` was safely blocked!
+            self.assertNotIn(("ranta", "r1"), rows)

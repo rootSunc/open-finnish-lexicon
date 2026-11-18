@@ -94,6 +94,16 @@ _CLOSED_CLASS_LEMMA_POS = {
     "ei": "verb",
     "olla": "verb",
 }
+# Unsegmented surface-token frequency lists contain high-frequency pronoun and
+# negation inflections that happen to share spelling with rare open-class or
+# foreign lemmas (e.g. ``et`` 2sg of ``ei`` vs Latin ``et`` "&", ``siitä`` ela.sg
+# of ``se`` vs archaic ``siitä`` "beget", ``häntä`` par.sg of ``hän`` vs "tail").
+_CLOSED_CLASS_SURFACE_TARGETS: dict[str, tuple[str, str]] = {
+    "et": ("ei", "verb"),
+    "älä": ("ei", "verb"),
+    "siitä": ("se", "pron"),
+    "häntä": ("hän", "pron"),
+}
 _FUNCTION_WORD_POS = frozenset({"pron", "conj", "aux", "adp"})
 
 
@@ -173,13 +183,33 @@ def _resolve_frequency_rows(
     provided_scores_by_lexeme: dict[int, float] = {}
     has_provided_scores = False
 
+    closed_surface_ids: dict[str, int] = {}
+    if any(not entry.lemma and entry.term in _CLOSED_CLASS_SURFACE_TARGETS for entry in entries):
+        target_lemmas = sorted({lm for lm, _p in _CLOSED_CLASS_SURFACE_TARGETS.values()})
+        target_lookup = {
+            (str(lm), str(p)): int(lid)
+            for lid, lm, p in conn.execute(
+                """
+                select id, lemma, part_of_speech
+                from lexicon.lexeme
+                where lemma = any(%s) and is_lemma = true
+                """,
+                (target_lemmas,),
+            ).fetchall()
+        }
+        for surface, key in _CLOSED_CLASS_SURFACE_TARGETS.items():
+            if key in target_lookup:
+                closed_surface_ids[surface] = target_lookup[key]
+
     for entry in entries:
         lexeme_id = None
         if entry.lemma and entry.pos:
             lexeme_id = exact_matches.get((entry.lemma, entry.pos))
             has_provided_scores = True
         else:
-            lexeme_id = analysis_matches.get(entry.term.casefold())
+            lexeme_id = closed_surface_ids.get(entry.term)
+            if lexeme_id is None:
+                lexeme_id = analysis_matches.get(entry.term.casefold())
             if lexeme_id is None:
                 lexeme_id = lemma_matches.get(entry.term)
             if lexeme_id is None:

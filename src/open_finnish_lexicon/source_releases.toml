@@ -92,3 +92,21 @@ local_path = ""
 archive_kind = "bz2"
 checksum_sha256 = ""
 members = ["fi_dbnary_enhancement.ttl"]
+
+[sources.omw_zh]
+version = "1.4-cmn"
+source_kind = "tab"
+url = "https://raw.githubusercontent.com/omwn/omw-data/v1.4/wns/cow/wn-data-cmn.tab"
+local_path = ""
+archive_kind = "plain"
+checksum_sha256 = "2226978e713f820dbd6154281ac6ec52528ca2334df3237846047952ff4df6bb"
+members = []
+
+[sources.cedict_zh]
+version = "1.0-mdbg"
+source_kind = "cedict"
+url = "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz"
+local_path = ""
+archive_kind = "gz"
+checksum_sha256 = ""
+members = []

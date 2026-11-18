@@ -21,7 +21,7 @@ sources
                                  download pinned releases and ingest them all
   ingest-<source> --input <path> ingest one local file
                                  sources: kaikki, omorfi, tatoeba, frequency,
-                                 finnwordnet, wiktionary-zh, dbnary-zh
+                                 finnwordnet, omw-zh, cedict-zh, wiktionary-zh, dbnary-zh
   seed-fixtures                  ingest the bundled fixtures (OFL_PROFILE=fixture)
   archive-stale-build-runs [--older-than-hours <n>]
 
