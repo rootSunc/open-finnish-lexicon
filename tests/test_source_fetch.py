@@ -282,7 +282,7 @@ class InterruptedExtractionTests(unittest.TestCase):
                 local_path="",
                 archive_kind="plain",
                 checksum_sha256=hashlib.sha256(content).hexdigest(),
-                members=(),
+                members=("archive.tsv",),
                 companions=(),
             )
             with self.assertRaisesRegex(FileNotFoundError, "missing offline archive"):
@@ -297,6 +297,11 @@ class InterruptedExtractionTests(unittest.TestCase):
                 fetch_release(release, root, offline=True, force_download=True)
             result = fetch_release(release, root, offline=True)
             self.assertEqual(result.archive_path, cached.resolve())
+            member = result.member_paths[0]
+            member.unlink()
+            member.write_bytes(b"stale extraction")
+            fetch_release(release, root, offline=True)
+            self.assertEqual(member.read_bytes(), content)
 
     def test_zip_cumulative_unpacked_bytes_limit_is_enforced(self):
         import zipfile

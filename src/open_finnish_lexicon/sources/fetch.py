@@ -331,13 +331,12 @@ def _fetch_asset(
         marker.unlink(missing_ok=True)
         _download_to_path(asset_source, archive_path)
 
+    if offline and not checksum_sha256:
+        raise ValueError(f"offline replay requires a checksum for {name}")
+    checksum = _verify_checksum(name, checksum_sha256, archive_path, remove_invalid=not offline)
     if offline:
-        if not checksum_sha256:
-            raise ValueError(f"offline replay requires a checksum for {name}")
-        # Verify the archive in place without deleting a historical input on error.
-        checksum = _verify_checksum(name, checksum_sha256, archive_path, remove_invalid=False)
-    else:
-        checksum = _verify_checksum(name, checksum_sha256, archive_path)
+        # Replay from the verified archive, even if an older extraction exists.
+        marker.unlink(missing_ok=True)
     member_paths = _extract_release(name, archive_kind, members, archive_path, unpack_dir)
     return archive_path, checksum, member_paths
 
