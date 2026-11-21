@@ -1,188 +1,146 @@
-# open-finnish-lexicon
+# Open Finnish Lexicon
 
-Build an offline Finnish lexicon with English definitions, inflected forms,
-example sentences, and an experimental Simplified Chinese gloss layer. Use the
-SQLite or JSON Lines exports in dictionary apps, study tools, or NLP pipelines.
+**Look up Finnish words as they appear in text.**
+
+Look up **`kädessä`** to find **`käsi`** (“hand”), marked as singular inessive.
+Look up **`juoksen`** to find **`juosta`** (“to run”), marked as first-person
+singular present indicative.
+
+An offline Finnish–English dictionary database for readers, dictionary apps,
+and data pipelines. The full dataset contains about **180,000 headwords**,
+**312,000 English senses**, and **4.84 million word-form records**.
+
+[Download the browser and SQLite sample](examples/open-finnish-lexicon-demo.zip) · [Download the full dataset](https://github.com/rootSunc/open-finnish-lexicon/releases/latest) · [Browse the export schema](docs/EXPORT_SCHEMA.md)
 
 ## Try the sample
 
-From a clone, with Python 3.12+, Docker Compose and the `sqlite3` command:
+The sample includes seven entries. Try `kädessä` for a case ending, `kuusi`
+for two meanings, or `tulin` for two possible headwords.
+
+Unzip the sample and open `index.html` in your browser. To query the same data
+directly, run this from the directory containing `sample.sqlite`.
 
 ```bash
-python -m venv .venv
+sqlite3 -readonly -header -column sample.sqlite "
+  SELECT f.surface_form, l.lemma, l.primary_gloss_en
+  FROM form AS f
+  JOIN v_lexeme_summary AS l ON l.id = f.lexeme_id
+  WHERE f.surface_form = 'kädessä' AND l.is_lemma = 1;
+"
+```
+
+```text
+surface_form  lemma  primary_gloss_en
+------------  -----  ----------------
+kädessä       käsi   hand
+```
+
+See [build the sample from source](#build-the-sample-from-source) to generate both files locally.
+
+## What you can do with it
+
+| Use case | Data you can use |
+| --- | --- |
+| Look up words as they appear in text | Inflected forms linked to headwords, with grammatical features and morphology rule-check results |
+| Show a full dictionary entry | Separate meanings and parts of speech, such as `kuusi` (“six” or “spruce”), plus IPA, syllable breaks, and usage notes where available |
+| Build vocabulary lists and flashcards | Frequency ranks, Finnish examples, and English translations where available |
+| Explore related words | Synonyms, broader and narrower terms, derived words, collocations, and topics |
+| Add Simplified Chinese glosses | Experimental glosses linked to individual meanings, with source and confidence information where available |
+
+The build brings together Wiktionary data from Kaikki, FinnWordNet, Tatoeba,
+FrequencyWords, and Chinese gloss sources. The exports preserve upstream
+references for definitions and available attribution for examples. See the
+[source catalog](src/open_finnish_lexicon/source_releases.toml).
+
+## Use the full dataset
+
+Download the files from the [latest GitHub Release](https://github.com/rootSunc/open-finnish-lexicon/releases/latest).
+Python and PostgreSQL are required for [building from source](#build-the-full-dataset).
+
+| Export | Best for |
+| --- | --- |
+| `fi.sqlite.zst` | Complete data with indexed headword and form lookup and FTS5 search |
+| `fi-lite.sqlite.zst` | Smaller offline readers and mobile apps. It includes the forms of selected headwords. |
+| `fi.jsonl.zst` | Bulk imports and NLP. It contains one entry per line after the source metadata header by default. |
+
+Download `lookup.py` alongside the SQLite archive. The example uses Python's
+standard library and opens the database read-only.
+
+```bash
+zstd -d -k fi.sqlite.zst
+python3 lookup.py fi.sqlite KÄDESSÄ
+python3 lookup.py fi.sqlite tulin
+```
+
+The first query finds `käsi` with singular inessive features. The second returns
+both `tulla` and `tuli`. The same commands work with `fi-lite.sqlite` when a word
+is included in that edition. See the [schema](docs/EXPORT_SCHEMA.md) for
+parameterized queries and [benchmark instructions](docs/RELEASING.md#evaluate-and-build-the-lite-edition)
+for comparing coverage.
+
+## Data coverage and feedback
+
+Experimental Simplified Chinese glosses cover about **19% of senses**.
+Examples have a match method so apps can distinguish source-provided examples
+from inferred matches. Tatoeba examples for words with multiple senses
+are exposed at headword level in schema 2. Form validation records whether the
+rules could confirm a word form. Use [sense references](docs/EXPORT_SCHEMA.md#save-and-restore-a-sense-reference)
+to carry bookmarks across snapshots.
+
+[Report a data issue](https://github.com/rootSunc/open-finnish-lexicon/issues/new?template=data.yml)
+with the word, dataset version and expected result.
+
+## Build the sample from source
+
+From the repository root, use Python 3.12+, Docker Compose, and `sqlite3`.
+The demo builds a SQLite file from the [included entries](examples/mini-kaikki.jsonl)
+in a separate PostgreSQL database. It skips upstream data downloads.
+
+```bash
+python3 -m venv .venv
 source .venv/bin/activate
-pip install .
+python -m pip install .
+
 docker compose up -d --wait demo
 OFL_DATABASE_URL=postgresql://ofl:ofl@127.0.0.1:54332/ofl_demo \
   OFL_PROFILE=fixture OFL_DATA_DIR=./data/demo \
   ofl build --manifest examples/source_releases.toml --output dist/demo.sqlite
-sqlite3 -header -column dist/demo.sqlite < examples/lookup.sql
+sqlite3 -readonly -header -column dist/demo.sqlite < examples/lookup.sql
+python scripts/package-demo.py dist/demo.sqlite dist/demo-site
+docker compose stop demo
 ```
 
-The three queries find the lemma behind `juoksen`, show both meanings of
-`kuusi`, and trace a sense to its source. The sample uses three
-[project-authored records](examples/mini-kaikki.jsonl) and a separate database.
-It works without the upstream datasets. Stop its database with
-`docker compose stop demo`. Pass `--overwrite` when rebuilding the sample.
+Open `dist/demo-site/index.html` in a browser or use `dist/demo-site/sample.sqlite`
+directly. Both contain the same sample.
 
-open-finnish-lexicon downloads releases of Kaikki (Wiktionary), Omorfi, Tatoeba,
-FinnWordNet and a Finnish frequency list, merges them into one PostgreSQL
-schema, validates inflected forms with a rule engine, and exports the result
-to SQLite or JSON Lines. An optional layer adds Chinese glosses from the
-Chinese Wiktionary, DBnary, Chinese Open Wordnet (OMW), and CC-CEDICT.
+The queries find the headword for `juoksen`, distinguish the two entries for
+`kuusi`, and trace the `juosta` definition to its source. Add `--overwrite` to
+the build command to replace the demo export.
 
-The repository includes source code and small fixtures. See
-[NOTICE.md](NOTICE.md) for data licenses and attribution.
+## Build the full dataset
 
-## What you get
-
-- **One schema for several sources.** Lexemes, senses, inflected forms,
-  pronunciations, examples, lexical relations, derivations, collocations and
-  topics, each linked to the source file it came from.
-- **Traceable builds.** Every source is listed in
-  [`source_releases.toml`](src/open_finnish_lexicon/source_releases.toml), and
-  each completed sync records the SHA-256 of each archive and companion file.
-  Several URLs are rolling, including Kaikki, Tatoeba and DBnary. Their catalog
-  labels group downloads. The hashes identify the actual inputs. Re-running
-  a sync activates each new source snapshot only after its projection succeeds.
-- **Quality gates.** Duplicate lexemes are merged, empty shells pruned, and
-  frequency imports refuse empty or sparse input. A pure-Python rule engine
-  marks each inflected form `verified`, `mismatch` or `uncertain`.
-- **Standalone exports.** `export-sqlite` writes one SQLite file.
-  `export-jsonl` writes one JSON object per lexeme. Both can carry source
-  fingerprints and provide source references for senses and translated examples.
-
-## Install
-
-Requires Python 3.12+ and PostgreSQL with the `unaccent` and `pg_trgm`
-extensions (both ship with PostgreSQL; tested on PostgreSQL 17). From a clone:
+Install `ofl` with the Python setup above, then start PostgreSQL and build the export.
 
 ```bash
-pip install .
-```
-
-The Omorfi source and the example-morphology check use the optional
-[Omorfi](https://github.com/flammie/omorfi) extra, which includes GPL-3.0 software.
-
-```bash
-pip install ".[omorfi]"
-```
-
-## Build the full lexicon
-
-The command-line tool is called `ofl`. With Docker, one command builds the
-whole lexicon:
-
-```bash
-docker compose up -d --wait db          # PostgreSQL on 127.0.0.1:54320
+docker compose up -d --wait db
 export OFL_DATABASE_URL=postgresql://ofl:ofl@127.0.0.1:54320/open_finnish_lexicon
 ofl build --output dist/fi.sqlite
 ```
 
-`ofl build` creates the schema, syncs the enabled sources, merges
-duplicate lexemes, rebuilds derived tables, and exports the result. The format
-follows the file name (`.sqlite`/`.db` or `.jsonl`). Next to the export it
-writes `fi.sqlite.report.json` with row counts, coverage, source versions and
-licenses, and the time each step took.
+The build downloads sources, merges duplicate entries, checks inflected forms
+against morphology rules, and writes the export and `<output>.report.json`.
+Allow tens of minutes and several gigabytes of disk space.
 
-Allow tens of minutes and several gigabytes for a full build, including source
-archives, unpacked data, PostgreSQL and the exports. An example build without
-Omorfi took about 26 minutes. In that snapshot the SQLite and JSONL exports
-were about 1.1 GB each before compression. The base install skips Omorfi.
-Chinese sources are enabled by default. For a smaller first build, try
-`--sources kaikki,frequency` on an empty database. Source filters control the
-current sync, and any other active snapshots in the database still take part
-in exports.
+Use `--output dist/fi.jsonl` for JSON Lines and `--skip-sync` to reuse sources
+already in PostgreSQL. Install the optional Omorfi integration with
+`python -m pip install '.[omorfi]'`. Run `ofl help` for all options and see
+the [release guide](docs/RELEASING.md) to package both formats with checksums.
 
-| Option | Effect |
-| --- | --- |
-| `--manifest <path>` | Use another `source_releases.toml` |
-| `--skip-sync` | Re-export from the existing database without downloading |
-| `--no-report` | Do not write the report file |
-| `--overwrite` | Replace each output and report file via an atomic rename |
-| `--sources <s1,s2>` | Sync only the selected sources (e.g. `kaikki,frequency`) |
-| `--exclude-sources <s1,s2>` | Skip specific sources during sync (e.g. `tatoeba`) |
-| `--force-download` | Re-download selected upstream archives even if cached locally |
-| `--pure-jsonl` | Omit the leading `_sources` metadata row when exporting `.jsonl` |
+## Development and licensing
 
-Exports write to a temporary `.part` file and atomically rename on completion.
-SQLite exports include foreign-key indexes, a `v_lexeme_summary` convenience
-view, and a `lexeme_fts` FTS5 full-text index; see
-[`docs/EXPORT_SCHEMA.md`](docs/EXPORT_SCHEMA.md) for table definitions and
-example queries.
+Install dev dependencies with `uv sync --group dev` and run `uv run pytest`.
+For PostgreSQL tests, run `scripts/test-db.sh` and export the connection
+string it prints as `OFL_TEST_DATABASE_URL`.
 
-### Step by step
-
-The same steps are available on their own:
-
-```bash
-ofl init-db                      # create the schema
-ofl sync-all                     # download and ingest every source
-ofl reconcile-lexemes            # merge duplicates and prune shells
-ofl refresh                      # collocations, Chinese layer, form checks
-ofl report-data-quality
-ofl export-sqlite --output dist/fi.sqlite
-ofl package-release --dist-dir dist/release         # export and package one validated snapshot
-```
-
-To ingest one local file instead, use `ingest-<source> --input <path>`
-(sources: `kaikki`, `omorfi`, `tatoeba`, `frequency`, `finnwordnet`,
-`omw-zh`, `cedict-zh`, `wiktionary-zh`, `dbnary-zh`). Run `ofl help` for every command.
-
-## Configuration
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `OFL_DATABASE_URL` | required | PostgreSQL connection string |
-| `OFL_DATA_DIR` | `./data` | Download and unpack directory |
-| `OFL_PROFILE` | `real` | `real` refuses fixture input; `fixture` is for tests |
-| `OFL_SOURCE_MANIFEST` | bundled | Alternative `source_releases.toml` |
-
-## Schema
-
-| Schema | Contents |
-| --- | --- |
-| `warehouse` | Source registry (with license), source files, raw documents and claims, build runs |
-| `lexicon` | Lexemes, senses, forms, form analyses and validation, pronunciations, examples, relations, derivations, collocations, topics, frequency signals |
-| `zh_layer` | Chinese glosses and example translations |
-| `semantic` | Chinese gloss candidates, selections and sense alignment |
-
-Source references are available for senses, forms, relations, and other
-projected records in PostgreSQL. The export schema lists the references
-available to downstream users.
-
-## How a sync works
-
-```text
-upstream release ──fetch──► data/releases/<source>/<version>/
-                 ──stage──► warehouse.source_document / source_claim
-                 ──project► lexicon.* / zh_layer.* / semantic.*
-                 ──refresh► collocations, Chinese gloss selection, form validation
-```
-
-A new snapshot is staged as `pending`, then projected and marked `active`
-in one transaction. Retired warehouse documents are cleaned up afterwards.
-Each source commits separately. Retry a failed sync to complete the remaining
-sources before exporting. Use one writer per build database.
-
-## Development
-
-```bash
-uv sync --group dev
-scripts/test-db.sh                      # throwaway PostgreSQL on 127.0.0.1:54331
-uv run pytest
-uv run ruff check src tests
-```
-
-Tests truncate tables, so they only run against a database whose name
-contains `test` (`OFL_TEST_DATABASE_URL`). The test suite also uses `zstd`
-on Python 3.12 and 3.13. Set `OFL_REQUIRE_TEST_DB=1` to require PostgreSQL in
-the test run. `ofl seed-fixtures` is a development command that reads
-`tests/fixtures/` from the repository root with `OFL_PROFILE=fixture`.
-
-For release steps and verification, see [docs/RELEASING.md](docs/RELEASING.md).
-
-## License
-
-Code: Apache-2.0 ([LICENSE](LICENSE)). Data built with this tool and the test
-fixtures are covered by their sources' licenses ([NOTICE.md](NOTICE.md)).
+Code is licensed under [Apache 2.0](LICENSE). Upstream data is subject to its
+source licenses. See [notices and attribution](NOTICE.md).

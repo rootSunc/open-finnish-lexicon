@@ -159,7 +159,9 @@ def _archive_filename(name: str, url: str, archive_kind: str) -> str:
     return filename or f"{name}.{archive_kind}"
 
 
-def _verify_checksum(name: str, checksum_sha256: str, archive_path: Path) -> str:
+def _verify_checksum(
+    name: str, checksum_sha256: str, archive_path: Path, *, remove_invalid: bool = True,
+) -> str:
     digest_builder = sha256()
     with archive_path.open("rb") as archive:
         while chunk := archive.read(COPY_CHUNK_BYTES):
@@ -167,7 +169,8 @@ def _verify_checksum(name: str, checksum_sha256: str, archive_path: Path) -> str
     digest = digest_builder.hexdigest()
     if checksum_sha256 and digest != checksum_sha256:
         # Remove the corrupted archive so a retry can re-download cleanly.
-        archive_path.unlink(missing_ok=True)
+        if remove_invalid:
+            archive_path.unlink(missing_ok=True)
         raise ValueError(f"checksum mismatch for {name}")
     return digest
 
@@ -314,6 +317,7 @@ def _fetch_asset(
     unpack_dir: Path,
     *,
     force_download: bool = False,
+    offline: bool = False,
 ) -> tuple[Path, str, tuple[Path, ...]]:
     asset_source = _resolve_asset_source(url, local_path)
     archive_path = target_dir / _archive_filename(name, asset_source, archive_kind)
@@ -322,10 +326,18 @@ def _fetch_asset(
         archive_path.unlink(missing_ok=True)
         marker.unlink(missing_ok=True)
     if not archive_path.exists():
+        if offline:
+            raise FileNotFoundError(f"missing offline archive for {name}: {archive_path}")
         marker.unlink(missing_ok=True)
         _download_to_path(asset_source, archive_path)
 
-    checksum = _verify_checksum(name, checksum_sha256, archive_path)
+    if offline:
+        if not checksum_sha256:
+            raise ValueError(f"offline replay requires a checksum for {name}")
+        # Verify the archive in place without deleting a historical input on error.
+        checksum = _verify_checksum(name, checksum_sha256, archive_path, remove_invalid=False)
+    else:
+        checksum = _verify_checksum(name, checksum_sha256, archive_path)
     member_paths = _extract_release(name, archive_kind, members, archive_path, unpack_dir)
     return archive_path, checksum, member_paths
 
@@ -335,7 +347,10 @@ def fetch_release(
     data_dir: Path,
     *,
     force_download: bool = False,
+    offline: bool = False,
 ) -> FetchResult:
+    if offline and force_download:
+        raise ValueError("offline replay cannot force downloads")
     target_dir = (data_dir / "releases" / release.name / release.version).resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -352,6 +367,7 @@ def fetch_release(
         target_dir,
         unpack_dir,
         force_download=force_download,
+        offline=offline,
     )
     all_member_paths = list(member_paths)
     assets = [SourceAsset(release.name, release.url, checksum)]
@@ -367,6 +383,7 @@ def fetch_release(
             target_dir,
             unpack_dir,
             force_download=force_download,
+            offline=offline,
         )
         all_member_paths.extend(companion_member_paths)
         assets.append(SourceAsset(companion.name, companion.url, companion_checksum))

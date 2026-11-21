@@ -1,0 +1,93 @@
+# Locked input catalog generated from a release manifest.
+
+[sources.cedict_zh]
+version = "1.0-mdbg"
+source_kind = "cedict"
+url = "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz"
+archive_kind = "gz"
+checksum_sha256 = "d7fbcfb99159d27db22787f515fd5548356607f8d9d381cb5c90917e3e7e0547"
+members = []
+
+[sources.dbnary_zh]
+version = "2026-05-02-fi"
+source_kind = "ttl"
+url = "https://kaiko.getalp.org/static/ontolex/latest/fi_dbnary_ontolex.ttl.bz2"
+archive_kind = "bz2"
+checksum_sha256 = "20f3bce55fbd346923cc4c282ab9e23d6312270b6dd96feee77b224f9e38079f"
+members = ["fi_dbnary_ontolex.ttl"]
+
+[[sources.dbnary_zh.companions]]
+name = "enhancement"
+url = "https://kaiko.getalp.org/static/ontolex/latest/fi_dbnary_enhancement.ttl.bz2"
+archive_kind = "bz2"
+checksum_sha256 = "a8cf5a8331a4c2df7be09b0da5f8d07e4e8c8aa6b3d87b1d9b1e5e208937bb33"
+members = ["fi_dbnary_enhancement.ttl"]
+
+[sources.finnwordnet]
+version = "2.0"
+source_kind = "tsv"
+url = "https://www.kielipankki.fi/download/FinnWordNet/v2.0/FinnWordNet-2.0.zip"
+archive_kind = "zip"
+checksum_sha256 = "fd613d9fb4bedf16002bfddef01fac6c0d2db79a701a35189557c909b9000615"
+members = ["FinnWordNet-2.0/rels"]
+
+[sources.frequency]
+version = "2018-fi-50k"
+source_kind = "txt"
+url = "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/fi/fi_50k.txt"
+archive_kind = "plain"
+checksum_sha256 = "8bc1d43dd54ea0c4432b1f6ae497759a332e984224819cf8a4f2337681c803b4"
+members = ["fi_50k.txt"]
+
+[sources.kaikki]
+version = "2026-05-03-fi"
+source_kind = "jsonl"
+url = "https://kaikki.org/dictionary/Finnish/kaikki.org-dictionary-Finnish.jsonl.gz"
+archive_kind = "gz"
+checksum_sha256 = "bc76b4fd95bf98b61cd68e1730f776c50c180b4b5ed83e24aa6ef28f25d0d787"
+members = []
+
+[sources.omw_zh]
+version = "1.4-cmn"
+source_kind = "tab"
+url = "https://raw.githubusercontent.com/omwn/omw-data/v1.4/wns/cow/wn-data-cmn.tab"
+archive_kind = "plain"
+checksum_sha256 = "2226978e713f820dbd6154281ac6ec52528ca2334df3237846047952ff4df6bb"
+members = []
+
+[sources.tatoeba]
+version = "current"
+source_kind = "tsv"
+url = "https://downloads.tatoeba.org/exports/per_language/fin/fin_sentences_detailed.tsv.bz2"
+archive_kind = "bz2"
+checksum_sha256 = "2904765f47310b58b8ca08f232c065cfd1e9f77c95ab12d4ea6771847d7d3f61"
+members = ["fin_sentences_detailed.tsv"]
+
+[[sources.tatoeba.companions]]
+name = "links"
+url = "https://downloads.tatoeba.org/exports/links.tar.bz2"
+archive_kind = "tar.bz2"
+checksum_sha256 = "08a802bfee9242fe2476836ec94e180588149f047451bce7519331b871b19e4f"
+members = ["links.csv"]
+
+[[sources.tatoeba.companions]]
+name = "eng_sentences"
+url = "https://downloads.tatoeba.org/exports/per_language/eng/eng_sentences_detailed.tsv.bz2"
+archive_kind = "bz2"
+checksum_sha256 = "f3a08a0af8deef3f50777cf0ccd7666f39e619f70fadae4327b7c29119468313"
+members = ["eng_sentences_detailed.tsv"]
+
+[[sources.tatoeba.companions]]
+name = "cmn_sentences"
+url = "https://downloads.tatoeba.org/exports/per_language/cmn/cmn_sentences_detailed.tsv.bz2"
+archive_kind = "bz2"
+checksum_sha256 = "d7dc7791eba00014a742fe0aff0d790affd54d49d9786fdfeabf0e8b98755a34"
+members = ["cmn_sentences_detailed.tsv"]
+
+[sources.wiktionary_zh]
+version = "2026-05-05-zhwiktionary-fi"
+source_kind = "jsonl"
+url = "https://kaikki.org/zhwiktionary/%E8%8A%AC%E5%85%B0%E8%AF%AD/kaikki.org-dictionary-%E8%8A%AC%E5%85%B0%E8%AF%AD.jsonl"
+archive_kind = "plain"
+checksum_sha256 = "f1b6b6354c8267983769fe3d0644b307f2b20349c9eeec8ff23050efa717154b"
+members = ["kaikki.org-dictionary-芬兰语.jsonl"]

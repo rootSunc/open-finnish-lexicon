@@ -9,6 +9,7 @@ import unittest
 import psycopg
 
 from open_finnish_lexicon.cli import main
+from open_finnish_lexicon.export import export_jsonl, export_sqlite
 from support import get_test_database_url
 
 DATA_TABLES = """
@@ -128,6 +129,48 @@ class EndToEndTests(unittest.TestCase):
             self.assertIn(expected_field, juosta)
         self.assertIn("notes", juosta["senses"][0])
         self.assertIn("warnings", juosta["senses"][0])
+
+    def test_export_keeps_ambiguous_tatoeba_examples_at_headword(self):
+        with tempfile.TemporaryDirectory() as temp_dir, psycopg.connect(get_test_database_url()) as conn:
+            lexeme_id = conn.execute("""
+                insert into lexicon.lexeme (lemma, display_lemma, part_of_speech)
+                values ('esimerkkisana', 'esimerkkisana', 'noun') returning id
+            """).fetchone()[0]
+            sense_id = conn.execute("""
+                insert into lexicon.lexeme_sense (lexeme_id, sense_key, gloss_en)
+                values (%s, 'test-1', 'sample'), (%s, 'test-2', 'demonstration') returning id
+            """, (lexeme_id, lexeme_id)).fetchone()[0]
+            rows = conn.execute("""
+                insert into lexicon.example (text_fi, source_label, quality_score)
+                values ('Testiesimerkki.', 'tatoeba', 0.95), ('Lähde-esimerkki.', 'wiktionary', 0.95)
+                returning id
+            """).fetchall()
+            conn.execute("""
+                insert into lexicon.sense_example (sense_id, example_id, is_core)
+                values (%s, %s, true), (%s, %s, true)
+            """, (sense_id, rows[0][0], sense_id, rows[1][0]))
+
+            sqlite_path = Path(temp_dir) / "export.sqlite"
+            jsonl_path = Path(temp_dir) / "export.jsonl"
+            export_sqlite(sqlite_path, connection=conn)
+            export_jsonl(jsonl_path, connection=conn)
+            conn.rollback()
+            with sqlite3.connect(sqlite_path) as db:
+                self.assertEqual(db.execute(
+                    "select example_id, match_method from lexeme_example where lexeme_id = ?",
+                    (lexeme_id,),
+                ).fetchall(), [(rows[0][0], "inferred-headword")])
+                self.assertEqual(db.execute(
+                    "select example_id, match_method from sense_example where sense_id = ?",
+                    (sense_id,),
+                ).fetchall(), [(rows[1][0], "source-sense")])
+
+            with jsonl_path.open(encoding="utf-8") as handle:
+                entries = (json.loads(line) for line in handle)
+                item = next(entry for entry in entries if entry.get("id") == lexeme_id)
+            self.assertEqual(item["examples"][0]["match_method"], "inferred-headword")
+            first = next(sense for sense in item["senses"] if sense["id"] == sense_id)
+            self.assertEqual([example["match_method"] for example in first["examples"]], ["source-sense"])
 
     def test_export_refuses_to_overwrite_unless_requested(self):
         with tempfile.TemporaryDirectory() as temp_dir:

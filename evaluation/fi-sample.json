@@ -1,0 +1,32 @@
+{
+  "passages": [
+    "Aamulla avasin ikkunan. Ulkona satoi, joten laitoin takin päälle ja lähdin töihin.",
+    "Kun tulin kotiin, lapsilla oli jo nälkä. Keitimme perunoita ja joimme vettä.",
+    "Pidän avainta kädessä. Juoksen talosta bussipysäkille, koska bussi tulee pian.",
+    "Kirjastossa on uusia kirjoja. Voinko lainata tämän ja palauttaa sen ensi viikolla?",
+    "Sairaanhoitaja pyysi minua odottamaan käytävällä. Huoneessa istui kolme ihmistä.",
+    "Kaupunki rakentaa uuden sillan joen yli. Nykyinen silta on remontissa kesäkuuhun asti."
+  ],
+  "forms": [
+    {"word": "KÄDESSÄ", "expected": ["käsi"]},
+    {"word": "KA\u0308DESSA\u0308", "expected": ["käsi"]},
+    {"word": "juoksen", "expected": ["juosta"]},
+    {"word": "tulin", "expected": ["tuli", "tulla"]},
+    {"word": "talossa", "expected": ["talo"]},
+    {"word": "olivat", "expected": ["olla"]},
+    {"word": "vedessä", "expected": ["vesi"]},
+    {"word": "uusia", "expected": ["uusi"]},
+    {"word": "kirjoja", "expected": ["kirja"]}
+  ],
+  "chinese": [
+    {"lemma": "kuusi", "pos": "num", "sense": "six", "expected": ["六"]},
+    {"lemma": "kuusi", "pos": "noun", "sense": "any tree", "expected": ["云杉"]},
+    {"lemma": "käsi", "pos": "noun", "sense": "hand", "expected": ["手"]},
+    {"lemma": "talo", "pos": "noun", "sense": "human abode", "expected": ["房", "屋", "宅"]},
+    {"lemma": "vesi", "pos": "noun", "sense": "water", "expected": ["水"]}
+  ],
+  "exclude_from_senses": [
+    {"lemma": "juosta", "sentence": "En tykkää juosta."},
+    {"lemma": "juosta", "sentence": "Se on hyvä työpaikka niin kauan kuin palkka juoksee."}
+  ]
+}

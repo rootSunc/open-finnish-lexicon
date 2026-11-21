@@ -1,0 +1,40 @@
+:root {
+  color-scheme: light;
+  --ink: #182b2a;
+  --muted: #47625e;
+  --green: #075f53;
+  --line: #c8ddd6;
+  background: #eef6f2;
+  color: var(--ink);
+  font-family: system-ui, sans-serif;
+  line-height: 1.55;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; border-top: 0.5rem solid var(--green); }
+main { max-width: 48rem; margin-inline: auto; padding: clamp(2rem, 7vw, 5rem) 1rem 2rem; }
+.project { color: var(--green); font-weight: 700; margin: 0 0 1.1rem; }
+h1, h2 { font-family: Georgia, serif; line-height: 1.07; }
+h1 { font-size: clamp(2.75rem, 9vw, 5rem); letter-spacing: -0.045em; margin: 0; }
+.intro { color: var(--muted); font-size: 1.125rem; max-width: 34rem; margin-bottom: 1.75rem; }
+.lookup { background: #fff; border: 1px solid var(--line); border-radius: 1rem; padding: clamp(1rem, 4vw, 2rem); }
+label { display: block; font-weight: 650; margin-bottom: 0.45rem; }
+.search { display: flex; gap: 0.5rem; }
+input, button { font: inherit; }
+input { min-width: 0; flex: 1; padding: 0.65rem 0.8rem; color: inherit; border: 1px solid #6d8c84; border-radius: 0.4rem; }
+button { cursor: pointer; border-radius: 0.4rem; }
+.search button { background: var(--green); border: 1px solid var(--green); padding: 0.65rem 0.85rem; color: #fff; font-weight: 650; }
+.search button:hover { background: #05453c; }
+.suggestions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.75rem; color: var(--muted); }
+.suggestions button { border: 1px solid var(--line); color: var(--green); background: #eef6f2; padding: 0.25rem 0.55rem; }
+.suggestions button:hover { border-color: var(--green); }
+.results { border-top: 1px solid var(--line); margin-top: 1.25rem; }
+.result { padding: 1rem 0 0; }
+.result + .result { border-top: 1px solid var(--line); margin-top: 1rem; }
+.result h2 { margin: 0; font-size: 2rem; }
+.result p { margin: 0.35rem 0 0; }
+.part-of-speech, .grammar, footer { color: var(--muted); }
+footer { padding-top: 0.45rem; }
+footer p { display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; margin: 0.65rem 0 0; }
+a { color: var(--green); text-underline-offset: 0.2em; }
+:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }

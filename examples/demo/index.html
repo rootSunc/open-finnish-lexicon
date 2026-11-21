@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Try Finnish word-form lookup with a small sample of Open Finnish Lexicon.">
+  <title>Try Open Finnish Lexicon</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="sample-data.js" defer></script>
+  <script src="lookup.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="project">Open Finnish Lexicon</p>
+      <h1>Find the word<br>behind the form.</h1>
+      <p class="intro">Look up a Finnish word as it appears in text and see its dictionary form, meaning, and grammar.</p>
+    </header>
+
+    <section class="lookup" aria-label="Dictionary lookup">
+      <form id="lookup">
+        <label for="word">Finnish word or inflected form</label>
+        <div class="search">
+          <input id="word" name="word" value="kädessä" lang="fi" spellcheck="false" autocomplete="off" required>
+          <button type="submit">Look up</button>
+        </div>
+      </form>
+      <div class="suggestions" aria-label="Example queries">
+        <span>Try</span>
+        <button type="button" lang="fi">juoksen</button>
+        <button type="button" lang="fi">tulin</button>
+        <button type="button" lang="fi">kuusi</button>
+        <button type="button" lang="fi">talossa</button>
+      </div>
+      <div id="results" class="results" aria-live="polite"></div>
+      <noscript><p>Enable JavaScript to try a lookup, or download the SQLite sample below.</p></noscript>
+    </section>
+
+    <footer>
+      <p>This demo contains a small set of example entries.</p>
+      <p><a href="sample.sqlite" download>Download sample SQLite</a><a href="https://github.com/rootSunc/open-finnish-lexicon">View source</a></p>
+    </footer>
+  </main>
+</body>
+</html>

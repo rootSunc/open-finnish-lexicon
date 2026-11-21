@@ -1,3 +1,7 @@
 {"word":"juosta","lang":"Finnish","lang_code":"fi","pos":"verb","senses":[{"id":"demo-juosta-verb","glosses":["to run"],"examples":[{"text":"Juoksen metsään.","english":"I run into the forest."}]}],"forms":[{"form":"juoksen","source":"conjugation","tags":["first-person","singular","present","indicative"]}]}
 {"word":"kuusi","lang":"Finnish","lang_code":"fi","pos":"num","senses":[{"id":"demo-kuusi-number","glosses":["six"]}]}
 {"word":"kuusi","lang":"Finnish","lang_code":"fi","pos":"noun","senses":[{"id":"demo-kuusi-tree","glosses":["spruce tree"]}]}
+{"word":"käsi","lang":"Finnish","lang_code":"fi","pos":"noun","senses":[{"id":"demo-kasi","glosses":["hand"]}],"forms":[{"form":"kädessä","source":"declension","tags":["singular","inessive"]}]}
+{"word":"talo","lang":"Finnish","lang_code":"fi","pos":"noun","senses":[{"id":"demo-talo","glosses":["house"]}],"forms":[{"form":"talossa","source":"declension","tags":["singular","inessive"]}]}
+{"word":"tulla","lang":"Finnish","lang_code":"fi","pos":"verb","senses":[{"id":"demo-tulla","glosses":["to come"]}],"forms":[{"form":"tulin","source":"conjugation","tags":["first-person","singular","past","indicative"]}]}
+{"word":"tuli","lang":"Finnish","lang_code":"fi","pos":"noun","senses":[{"id":"demo-tuli","glosses":["fire"]}],"forms":[{"form":"tulin","source":"declension","tags":["plural","instructive"]}]}

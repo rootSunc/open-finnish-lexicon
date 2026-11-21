@@ -16,8 +16,9 @@ import warnings
 import psycopg
 
 from open_finnish_lexicon.db import connection_scope
+from open_finnish_lexicon.lookup import lookup_key
 
-EXPORT_SCHEMA_VERSION = 1
+EXPORT_SCHEMA_VERSION = 2
 
 # (sqlite table, column definitions, postgres select returning the same columns)
 SQLITE_TABLES: tuple[tuple[str, str, LiteralString], ...] = (
@@ -57,8 +58,17 @@ SQLITE_TABLES: tuple[tuple[str, str, LiteralString], ...] = (
     (
         "sense_example",
         "sense_id integer not null references sense(id), "
-        "example_id integer not null references example(id), sort_order integer",
-        "select sense_id, example_id, sort_order from lexicon.sense_example order by sense_id, sort_order, example_id",
+        "example_id integer not null references example(id), sort_order integer, match_method text",
+        "select sense_id, example_id, sort_order, match_method from lexicon.export_example_link "
+        "where match_method <> 'inferred-headword' order by sense_id, sort_order, example_id",
+    ),
+    (
+        "lexeme_example",
+        "lexeme_id integer not null references lexeme(id), "
+        "example_id integer not null references example(id), sort_order integer, match_method text",
+        "select lexeme_id, example_id, min(sort_order), match_method from lexicon.export_example_link "
+        "where match_method = 'inferred-headword' group by lexeme_id, example_id, match_method "
+        "order by lexeme_id, min(sort_order), example_id",
     ),
     (
         "relation",
@@ -142,16 +152,17 @@ SQLITE_TABLES: tuple[tuple[str, str, LiteralString], ...] = (
 
 SQLITE_INDEXES: tuple[str, ...] = (
     "create index idx_lexeme_lemma on lexeme (lemma)",
-    "create index idx_lexeme_lemma_nocase on lexeme (lemma collate nocase)",
+    "create index idx_lexeme_lookup_key on lexeme (lookup_key)",
     "create index idx_lexeme_frequency on lexeme (frequency_rank) where frequency_rank is not null",
     "create index idx_sense_lexeme on sense (lexeme_id)",
     "create index idx_sense_source_sense on sense_source (sense_id)",
     "create index idx_form_lexeme on form (lexeme_id)",
     "create index idx_form_surface on form (surface_form)",
-    "create index idx_form_surface_nocase on form (surface_form collate nocase)",
+    "create index idx_form_lookup_key on form (lookup_key)",
     "create index idx_pronunciation_lexeme on pronunciation (lexeme_id)",
     "create index idx_sense_example_sense on sense_example (sense_id)",
     "create index idx_sense_example_example on sense_example (example_id)",
+    "create index idx_lexeme_example_lexeme on lexeme_example (lexeme_id)",
     "create index idx_relation_source on relation (source_lexeme_id)",
     "create index idx_relation_target on relation (target_lexeme_id)",
     "create index idx_derivation_parent on derivation (parent_lexeme_id)",
@@ -260,15 +271,22 @@ def export_sqlite(
             target.execute("insert into export_metadata values (?)", (build_id,))
         with connection_scope(connection) as conn:
             for table, columns, select_sql in SQLITE_TABLES:
+                normalized_column = {"lexeme": 1, "form": 2}.get(table)
+                if normalized_column is not None:
+                    columns += ", lookup_key text not null"
                 target.execute(f"create table {table} ({columns})")
                 total = 0
                 with conn.cursor(name=f"export_{table}") as cursor:
                     cursor.itersize = BATCH_SIZE
                     cursor.execute(select_sql)
                     assert cursor.description is not None
-                    placeholders = ", ".join("?" * len(cursor.description))
+                    placeholders = ", ".join("?" * (len(cursor.description) + (normalized_column is not None)))
                     while rows := cursor.fetchmany(BATCH_SIZE):
-                        target.executemany(f"insert into {table} values ({placeholders})", rows)
+                        if normalized_column is not None:
+                            insert_rows = [(*row, lookup_key(row[normalized_column])) for row in rows]
+                        else:
+                            insert_rows = rows
+                        target.executemany(f"insert into {table} values ({placeholders})", insert_rows)
                         total += len(rows)
                 counts[table] = total
         for index_sql in SQLITE_INDEXES:
@@ -349,9 +367,10 @@ select jsonb_build_object(
                     'zh', zet.text_zh,
                     'source', e.source_label,
                     'attribution', e.attribution,
-                    'provenance', e.provenance
+                    'provenance', e.provenance,
+                    'match_method', se.match_method
                 ) order by se.sort_order, e.id)
-                from lexicon.sense_example se
+                from lexicon.export_example_link se
                 join lexicon.example e on e.id = se.example_id
                 left join lateral (
                     select t.text_zh
@@ -363,7 +382,7 @@ select jsonb_build_object(
                     order by t.id
                     limit 1
                 ) zet on true
-                where se.sense_id = s.id
+                where se.sense_id = s.id and se.match_method <> 'inferred-headword'
             ), '[]'::jsonb)
         ) order by s.sort_order, s.id)
         from lexicon.lexeme_sense s
@@ -387,6 +406,25 @@ select jsonb_build_object(
             limit 1
         ) zg on true
         where s.lexeme_id = l.id
+    ), '[]'::jsonb),
+    'examples', coalesce((
+        select jsonb_agg(jsonb_build_object(
+            'fi', e.text_fi, 'en', e.text_en, 'zh', zet.text_zh, 'source', e.source_label,
+            'attribution', e.attribution, 'provenance', e.provenance,
+            'match_method', 'inferred-headword'
+        ) order by link.sort_order, e.id)
+        from (
+            select se.example_id, min(se.sort_order) as sort_order
+            from lexicon.export_example_link se
+            where se.lexeme_id = l.id and se.match_method = 'inferred-headword'
+            group by se.example_id
+        ) link
+        join lexicon.example e on e.id = link.example_id
+        left join lateral (
+            select t.text_zh from zh_layer.zh_example_translation t
+            where t.example_id = e.id and t.is_primary and t.is_usable and btrim(t.text_zh) <> ''
+            order by t.id limit 1
+        ) zet on true
     ), '[]'::jsonb),
     'forms', coalesce((
         select jsonb_agg(jsonb_build_object(

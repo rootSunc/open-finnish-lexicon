@@ -6,11 +6,16 @@
 
 Both exports write via a temporary `.<filename>.part` file and atomically replace the target on completion, so a failed or interrupted run never leaves a half-written artifact. Pass `--overwrite` to replace an existing file.
 
-The initial SQLite schema version is `1` in `PRAGMA user_version`. Release
-manifests identify the schema version of both formats. Treat numeric lexeme,
-sense, and form IDs as identifiers within one snapshot. Rebuilds can assign
-different IDs. For a lookup across snapshots, start with the lemma and part of
-speech, then compare the senses or upstream references.
+The current export schema is **2**. Check SQLite's `PRAGMA user_version` or
+the release manifest for either format. Header-bearing release JSONL also
+carries `_export.schema_version`. Consumers should check the schema they
+support and read named fields. Schema 2 preserves existing column names, adds
+normalized lookup keys, and moves inferred examples for multi-sense words from
+their former sense to the headword.
+
+Numeric lexeme, sense, and form IDs identify records within one snapshot.
+SQLite full and lite editions derived from the same snapshot share IDs for
+records included in both.
 
 ---
 
@@ -20,12 +25,13 @@ speech, then compare the senses or upstream references.
 
 | Table | Primary Key | Columns | Description |
 | :--- | :--- | :--- | :--- |
-| `lexeme` | `id` | `id`, `lemma`, `display_lemma`, `part_of_speech`, `frequency_rank`, `is_lemma` | Headwords (`is_lemma = 1` for canonical lemmas, `0` for pure `form-of` inflection entries). |
+| `lexeme` | `id` | `id`, `lemma`, `display_lemma`, `part_of_speech`, `frequency_rank`, `is_lemma`, `lookup_key` | Headwords (`is_lemma = 1` for canonical lemmas, `0` for pure `form-of` inflection entries). |
 | `sense` | `id` | `id`, `lexeme_id`, `sense_key`, `gloss_fi`, `gloss_en`, `labels` (JSON), `sort_order` | Word senses and English/Finnish definitions. |
-| `form` | `id` | `id`, `lexeme_id`, `surface_form`, `form_kind`, `features` (JSON), `validation` | Inflected surface forms and rule-validator verdicts (`verified`, `mismatch`, `uncertain`). |
+| `form` | `id` | `id`, `lexeme_id`, `surface_form`, `form_kind`, `features` (JSON), `validation`, `lookup_key` | Inflected surface forms and rule-validator verdicts (`verified`, `mismatch`, `uncertain`). |
 | `pronunciation` | `id` | `id`, `lexeme_id`, `ipa`, `syllabification` | Phonemic/phonetic IPA and middle-dot (`·`) Finnish syllabification. |
 | `example` | `id` | `id`, `text_fi`, `text_en`, `source_label`, `attribution`, `provenance` (JSON) | Example sentences and available original sentence references keyed by language. |
-| `sense_example` | — | `sense_id`, `example_id`, `sort_order` | Links senses to ranked example sentences. |
+| `sense_example` | — | `sense_id`, `example_id`, `sort_order`, `match_method` | Links examples to specific senses. |
+| `lexeme_example` | — | `lexeme_id`, `example_id`, `sort_order`, `match_method` | Links inferred examples to headwords. |
 | `sense_source` | — | `sense_id`, `source_name`, `source_entry` | Active sources of the base sense and its upstream entry label. |
 | `zh_gloss` | — | `sense_id`, `gloss_zh`, `method`, `source_name`, `source_entry`, `confidence` | Primary Simplified Chinese glosses and available alignment evidence. |
 | `zh_example_translation` | — | `example_id`, `text_zh`, `method` | Usable primary Simplified Chinese translations of example sentences. |
@@ -42,6 +48,46 @@ speech, then compare the senses or upstream references.
 
 - **`v_lexeme_summary`** contains `id`, `lemma`, `display_lemma`, `part_of_speech`, `frequency_rank`, `is_lemma`, `primary_ipa`, `primary_gloss_en` and `primary_gloss_zh`. Both gloss columns come from the same sense.
 - **`lexeme_fts`** uses SQLite FTS5 (`unicode61 remove_diacritics 2`) for token search on headwords and glosses. Use the regular indexes for exact form lookups. For Chinese substring matching, use the query below. An export made with SQLite compiled without FTS5 issues a warning and contains the regular indexes.
+
+### Indexed lookup and example evidence
+
+Bind the normalized text as a SQL parameter. The normalization is whitespace
+trimming, NFC, Unicode case folding, then NFC again. It preserves Finnish
+letters such as `ä` and `ö`.
+
+```sql
+SELECT l.lemma, l.part_of_speech, l.primary_gloss_en, f.features
+FROM form f JOIN v_lexeme_summary l ON l.id = f.lexeme_id
+WHERE f.lookup_key = :normalized_word AND l.is_lemma = 1;
+```
+
+Use `lexeme.lookup_key` for direct headword hits. The
+[reference Python example](../src/open_finnish_lexicon/lookup.py) combines both
+queries and returns multiple grammatical readings. It lists headword hits
+before inflected forms, then exact spelling, frequency rank, and lemma within
+each group. It also reads schema 1
+using exact and normalized input variants against that version's exact indexes.
+The schema 1 fallback has limited matching for mixed-case stored surfaces.
+
+`source-sense` identifies an example supplied with the sense.
+`inferred-single-sense` marks a Tatoeba link attached to the only sense of a
+headword. `inferred-headword` marks a Tatoeba link exported at headword level.
+These methods describe the evidence for the link. They do not score
+translation accuracy.
+
+### Save and restore a sense reference
+
+```bash
+python3 lookup.py old.sqlite --save-sense 42 > bookmark.json
+python3 lookup.py new.sqlite --resolve-sense bookmark.json
+```
+
+The reference contains the original lemma, part of speech, and English gloss.
+The resolver matches the normalized gloss within that lemma and part of speech.
+One match returns `matched` and the new numeric ID. Multiple matches return
+`ambiguous` with candidate IDs. An edited gloss, deleted sense, or entry omitted
+from lite may return `unresolved`; apps should keep the original bookmark for
+manual review.
 
 ### Example SQLite Queries
 
@@ -100,7 +146,9 @@ includes source metadata in its report and manifest. The standalone
 Packaged JSONL with a header includes `_export` with the build ID and schema
 version. In pure mode the report binds the JSONL file to its snapshot by its
 SHA-256. Sense objects include `sources` and `gloss_zh_source`. Example objects
-include `provenance` when upstream identifiers are available. Tatoeba provenance
+include `provenance` when upstream identifiers are available and
+`match_method` in schema 2. Headword-level examples appear in the top-level
+`examples` array. Sense-level examples remain inside each sense. Tatoeba provenance
 lists each language's sentence ID, source URL, contributor where available,
 and whether a translation was linked through a pivot. Re-ingest older
 snapshots to populate these fields.

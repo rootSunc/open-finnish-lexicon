@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import time
@@ -369,6 +370,8 @@ def sync_all(
     selected_sources = _resolve_selected_sources(
         sources=sources, exclude_sources=exclude_sources
     )
+    offline = os.environ.get("OFL_OFFLINE") == "1"
+    fetch_options = {"offline": True} if offline else {}
     with _sync_lock():
         archive_stale_build_runs()
         build_run_id = _create_build_run()
@@ -390,6 +393,7 @@ def sync_all(
                     release,
                     Path(settings.data_dir),
                     force_download=force_download,
+                    **fetch_options,
                 )
                 _log(f"{source_name}: fetch done in {time.monotonic() - fetch_started:.1f}s")
                 _run_source(

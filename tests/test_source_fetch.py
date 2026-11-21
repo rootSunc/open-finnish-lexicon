@@ -270,6 +270,34 @@ class InterruptedExtractionTests(unittest.TestCase):
             cached_dir = Path(tmpdir) / "releases/omorfi/fixture-bad-sum"
             self.assertFalse((cached_dir / archive_path.name).exists())
 
+    def test_offline_requires_existing_verified_archive_and_never_removes_it(self):
+        content = b"archived data"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            release = SourceRelease(
+                name="fixture",
+                version="locked",
+                source_kind="tsv",
+                url="https://example.invalid/archive.tsv",
+                local_path="",
+                archive_kind="plain",
+                checksum_sha256=hashlib.sha256(content).hexdigest(),
+                members=(),
+                companions=(),
+            )
+            with self.assertRaisesRegex(FileNotFoundError, "missing offline archive"):
+                fetch_release(release, root, offline=True)
+            cached = root / "releases/fixture/locked/archive.tsv"
+            cached.write_bytes(b"different data")
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                fetch_release(release, root, offline=True)
+            self.assertEqual(cached.read_bytes(), b"different data")
+            cached.write_bytes(content)
+            with self.assertRaisesRegex(ValueError, "cannot force downloads"):
+                fetch_release(release, root, offline=True, force_download=True)
+            result = fetch_release(release, root, offline=True)
+            self.assertEqual(result.archive_path, cached.resolve())
+
     def test_zip_cumulative_unpacked_bytes_limit_is_enforced(self):
         import zipfile
         from unittest.mock import patch
