@@ -10,7 +10,7 @@ An offline Finnish–English dictionary database for readers, dictionary apps,
 and data pipelines. The full dataset contains about **180,000 headwords**,
 **312,000 English senses**, and **4.84 million word-form records**.
 
-[Download the browser and SQLite sample](examples/open-finnish-lexicon-demo.zip) · [Download the full dataset](https://github.com/rootSunc/open-finnish-lexicon/releases/latest) · [Browse the export schema](docs/EXPORT_SCHEMA.md)
+[Download SQLite Lite · 16 MiB](https://github.com/rootSunc/open-finnish-lexicon/releases/latest/download/fi-lite.sqlite.zst) · [Download the full dataset](https://github.com/rootSunc/open-finnish-lexicon/releases/latest) · [Try the browser and SQLite sample](examples/open-finnish-lexicon-demo.zip) · [Browse the export schema](docs/EXPORT_SCHEMA.md)
 
 ## Try the sample
 
